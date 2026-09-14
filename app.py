@@ -2,9 +2,11 @@ import json
 import streamlit as st
 import requests
 
-API_URL = "http://127.0.0.1:8000"
+# Live Render backend URL with fallback for local development
+DEFAULT_API_URL = "https://ai-knowledge-base-assistant-omgm.onrender.com"
+API_URL = st.secrets.get("API_URL", DEFAULT_API_URL)
 
-st.set_page_config(page_title="AI Knowledge Base", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="AI Knowledge Base Assistant", page_icon="🤖", layout="wide")
 st.title("🤖 AI Knowledge Base Assistant")
 
 # Sidebar Controls
@@ -13,10 +15,10 @@ with st.sidebar:
     uploaded_file = st.file_uploader("Upload a PDF or TXT file", type=["pdf", "txt"])
     
     if uploaded_file and st.button("Process & Ingest", use_container_width=True):
-        with st.spinner("Chunking, embedding, and storing in Supabase..."):
+        with st.spinner("Chunking, embedding, and saving to Supabase..."):
             files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
             try:
-                res = requests.post(f"{API_URL}/upload-document", files=files)
+                res = requests.post(f"{API_URL}/upload-document", files=files, timeout=60)
                 if res.status_code == 200:
                     data = res.json()
                     st.success(f"Ingested {data['chunks_created']} chunks from '{data['filename']}'!")
@@ -33,7 +35,7 @@ with st.sidebar:
     if st.button("Save Manual Entry", use_container_width=True):
         if title.strip() and content.strip():
             try:
-                res = requests.post(f"{API_URL}/add-knowledge", json={"title": title, "content": content})
+                res = requests.post(f"{API_URL}/add-knowledge", json={"title": title, "content": content}, timeout=30)
                 if res.status_code == 200:
                     st.success("Entry added successfully!")
                 else:
@@ -48,11 +50,11 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-# Initialize Chat State
+# Initialize Chat History
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display Conversation History
+# Render Previous Chat Turns
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
@@ -63,7 +65,7 @@ for msg in st.session_state.messages:
                     st.markdown(f"**{src.get('title', 'Unknown')}** (Similarity: `{similarity_val:.2f}`)")
                     st.caption(src.get("content", ""))
 
-# Handle User Query with Real-time Stream
+# Chat Interaction
 user_query = st.chat_input("Ask a question about your knowledge base...")
 if user_query:
     history_payload = [
@@ -81,14 +83,14 @@ if user_query:
                 with requests.post(
                     f"{API_URL}/ask-stream",
                     json={"question": user_query, "history": history_payload},
-                    stream=True
+                    stream=True,
+                    timeout=60
                 ) as res:
                     if res.status_code != 200:
                         yield f"API Error {res.status_code}: {res.text}"
                         return
 
                     iterator = res.iter_lines(decode_unicode=True)
-                    # The first line contains the metadata and sources in JSON
                     first_line = next(iterator, None)
                     sources = []
                     if first_line:
@@ -106,11 +108,9 @@ if user_query:
             except Exception as err:
                 yield f"Connection failed: {err}"
 
-        # Render stream live in Streamlit
         st.session_state._current_sources = []
         full_response = st.write_stream(stream_generator())
 
-        # Show sources under an expander
         current_sources = st.session_state.get("_current_sources", [])
         if current_sources:
             with st.expander("View Retrieved Sources"):
