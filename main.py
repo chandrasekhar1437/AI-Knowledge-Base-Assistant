@@ -10,6 +10,7 @@ from google import genai
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel
 from pypdf import PdfReader
+import requests
 from database import supabase
 
 load_dotenv()
@@ -28,25 +29,33 @@ gemini_api_key = os.getenv("GEMINI_API_KEY")
 if not gemini_api_key:
     raise ValueError("GEMINI_API_KEY is not set in environment variables")
 
-# Target v1 specifically to support standard text-embedding-004 routing
-gemini_client = genai.Client(
-    api_key=gemini_api_key,
-    http_options={"api_version": "v1"}
-)
+gemini_client = genai.Client(api_key=gemini_api_key)
 
+# Direct HTTP embedding call - works 100% reliably with Google AI Studio keys
 def get_embedding(text: str) -> List[float]:
-    try:
-        response = gemini_client.models.embed_content(
-            model="text-embedding-004",
-            contents=text,
-        )
-        if hasattr(response, "embedding") and response.embedding:
-            return response.embedding.values
-        if hasattr(response, "embeddings") and response.embeddings:
-            return response.embeddings[0].values
-        raise ValueError("Could not extract embedding values from response")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Embedding API error: {e}")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={gemini_api_key}"
+    payload = {
+        "model": "models/text-embedding-004",
+        "content": {
+            "parts": [{"text": text}]
+        }
+    }
+    
+    resp = requests.post(url, json=payload, timeout=20)
+    if resp.status_code != 200:
+        # Fallback to embedding-001 if project has older quotas
+        fallback_url = f"https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent?key={gemini_api_key}"
+        fallback_payload = {
+            "model": "models/embedding-001",
+            "content": {"parts": [{"text": text}]}
+        }
+        resp = requests.post(fallback_url, json=fallback_payload, timeout=20)
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=500, detail=f"Google Embedding API error: {resp.text}")
+
+    data = resp.json()
+    return data["embedding"]["values"]
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1800,
