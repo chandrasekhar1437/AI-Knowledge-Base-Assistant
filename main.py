@@ -28,28 +28,25 @@ gemini_api_key = os.getenv("GEMINI_API_KEY")
 if not gemini_api_key:
     raise ValueError("GEMINI_API_KEY is not set in environment variables")
 
-gemini_client = genai.Client(api_key=gemini_api_key)
+# Target v1 specifically to support standard text-embedding-004 routing
+gemini_client = genai.Client(
+    api_key=gemini_api_key,
+    http_options={"api_version": "v1"}
+)
 
-# Resilient embedding retrieval function
 def get_embedding(text: str) -> List[float]:
-    candidate_models = ["text-embedding-004", "models/text-embedding-004", "embedding-001"]
-    last_error = None
-
-    for model_name in candidate_models:
-        try:
-            response = gemini_client.models.embed_content(
-                model=model_name,
-                contents=text,
-            )
-            if hasattr(response, "embedding") and response.embedding:
-                return response.embedding.values
-            if hasattr(response, "embeddings") and response.embeddings:
-                return response.embeddings[0].values
-        except Exception as err:
-            last_error = err
-            continue
-
-    raise HTTPException(status_code=500, detail=f"Embedding failure across fallback models: {last_error}")
+    try:
+        response = gemini_client.models.embed_content(
+            model="text-embedding-004",
+            contents=text,
+        )
+        if hasattr(response, "embedding") and response.embedding:
+            return response.embedding.values
+        if hasattr(response, "embeddings") and response.embeddings:
+            return response.embeddings[0].values
+        raise ValueError("Could not extract embedding values from response")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Embedding API error: {e}")
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1800,
@@ -193,7 +190,7 @@ Answer:"""
             yield f"{sources_payload}\n"
 
             response_stream = gemini_client.models.generate_content_stream(
-                model="gemini-3.5-flash-lite",
+                model="gemini-2.5-flash",
                 contents=prompt,
             )
             for chunk in response_stream:
