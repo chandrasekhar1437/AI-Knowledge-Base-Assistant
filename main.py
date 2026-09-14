@@ -26,17 +26,30 @@ app.add_middleware(
 
 gemini_api_key = os.getenv("GEMINI_API_KEY")
 if not gemini_api_key:
-    raise ValueError("GEMINI_API_KEY is not set in the .env file")
+    raise ValueError("GEMINI_API_KEY is not set in environment variables")
 
 gemini_client = genai.Client(api_key=gemini_api_key)
 
-# Cloud-based API embedding function (Zero local RAM used)
+# Resilient embedding retrieval function
 def get_embedding(text: str) -> List[float]:
-    response = gemini_client.models.embed_content(
-        model="text-embedding-004",
-        contents=text
-    )
-    return response.embedding.values
+    candidate_models = ["text-embedding-004", "models/text-embedding-004", "embedding-001"]
+    last_error = None
+
+    for model_name in candidate_models:
+        try:
+            response = gemini_client.models.embed_content(
+                model=model_name,
+                contents=text,
+            )
+            if hasattr(response, "embedding") and response.embedding:
+                return response.embedding.values
+            if hasattr(response, "embeddings") and response.embeddings:
+                return response.embeddings[0].values
+        except Exception as err:
+            last_error = err
+            continue
+
+    raise HTTPException(status_code=500, detail=f"Embedding failure across fallback models: {last_error}")
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1800,
