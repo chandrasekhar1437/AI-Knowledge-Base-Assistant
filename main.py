@@ -10,7 +10,6 @@ from google import genai
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel
 from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
 from database import supabase
 
 load_dotenv()
@@ -25,13 +24,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-
 gemini_api_key = os.getenv("GEMINI_API_KEY")
 if not gemini_api_key:
     raise ValueError("GEMINI_API_KEY is not set in the .env file")
 
 gemini_client = genai.Client(api_key=gemini_api_key)
+
+# Cloud-based API embedding function (Zero local RAM used)
+def get_embedding(text: str) -> List[float]:
+    response = gemini_client.models.embed_content(
+        model="text-embedding-004",
+        contents=text
+    )
+    return response.embedding.values
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1800,
@@ -63,7 +68,7 @@ def home():
 def add_knowledge(item: KnowledgeItem):
     try:
         text_to_embed = f"{item.title}: {item.content}"
-        vector = embed_model.encode(text_to_embed).tolist()
+        vector = get_embedding(text_to_embed)
 
         response = supabase.table("knowledge_base").insert({
             "title": item.title,
@@ -103,7 +108,7 @@ async def upload_document(file: UploadFile = File(...)):
         rows_to_insert = []
         for index, chunk in enumerate(chunks):
             enriched_content = f"Document: {clean_doc_name}\nSection {index + 1}:\n{chunk}"
-            vector = embed_model.encode(enriched_content).tolist()
+            vector = get_embedding(enriched_content)
             rows_to_insert.append({
                 "title": f"{filename} (part {index + 1})",
                 "content": enriched_content,
@@ -123,7 +128,7 @@ async def upload_document(file: UploadFile = File(...)):
 @app.post("/search")
 def search_knowledge(search: SearchQuery):
     try:
-        query_vector = embed_model.encode(search.query).tolist()
+        query_vector = get_embedding(search.query)
 
         response = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
@@ -135,11 +140,10 @@ def search_knowledge(search: SearchQuery):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# Streaming RAG Endpoint
 @app.post("/ask-stream")
 def ask_ai_stream(request: AskQuery):
     try:
-        query_vector = embed_model.encode(request.question).tolist()
+        query_vector = get_embedding(request.question)
 
         matched_chunks = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
@@ -172,11 +176,9 @@ User Question: {request.question}
 Answer:"""
 
         def token_generator():
-            # Send the retrieved sources first as a structured JSON line
             sources_payload = json.dumps({"sources": matched_chunks})
             yield f"{sources_payload}\n"
 
-            # Stream text chunks as they arrive from Gemini
             response_stream = gemini_client.models.generate_content_stream(
                 model="gemini-3.5-flash-lite",
                 contents=prompt,

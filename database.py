@@ -4,10 +4,10 @@ from supabase import create_client, Client
 
 load_dotenv()
 
-url: str = os.getenv("SUPABASE_URL")
-key: str = os.getenv("SUPABASE_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-if not url or not key:
-    raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set in your .env file")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("Missing SUPABASE_URL or SUPABASE_KEY in environment variables.")
 
-supabase: Client = create_client(url, key)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
