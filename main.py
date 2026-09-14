@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-import google.generativeai as genai
+from google import genai
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel
 from pypdf import PdfReader
@@ -29,27 +29,31 @@ gemini_api_key = os.getenv("GEMINI_API_KEY")
 if not gemini_api_key:
     raise ValueError("GEMINI_API_KEY is not set in environment variables")
 
-genai.configure(api_key=gemini_api_key)
+gemini_client = genai.Client(api_key=gemini_api_key)
 
-# Free Hugging Face Feature Extraction (Outputs 384-dim vectors, uses 0 MB RAM)
-HF_EMBED_URL = "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2"
-
+# Direct REST call to Gemini text-embedding-004 (Zero RAM overhead)
 def get_embedding(text: str) -> List[float]:
-    try:
-        response = requests.post(
-            HF_EMBED_URL,
-            json={"inputs": text},
-            timeout=30
-        )
-        if response.status_code == 200:
-            result = response.json()
-            if isinstance(result, list) and len(result) > 0 and isinstance(result[0], list):
-                return result[0]
-            if isinstance(result, list):
-                return result
-        raise ValueError(f"Inference error: {response.text}")
-    except Exception as err:
-        raise HTTPException(status_code=500, detail=f"Embedding API error: {err}")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={gemini_api_key}"
+    payload = {
+        "content": {
+            "parts": [{"text": text}]
+        }
+    }
+    
+    response = requests.post(url, json=payload, timeout=30)
+    
+    if response.status_code == 200:
+        data = response.json()
+        return data["embedding"]["values"]
+    
+    # Fallback to embedding-001 if model availability differs by project
+    fallback_url = f"https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent?key={gemini_api_key}"
+    fb_response = requests.post(fallback_url, json=payload, timeout=30)
+    if fb_response.status_code == 200:
+        data = fb_response.json()
+        return data["embedding"]["values"]
+
+    raise HTTPException(status_code=500, detail=f"Gemini Embedding Error: {response.text}")
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1800,
@@ -192,9 +196,11 @@ Answer:"""
             sources_payload = json.dumps({"sources": matched_chunks})
             yield f"{sources_payload}\n"
 
-            model = genai.GenerativeModel("gemini-2.5-flash")
-            response = model.generate_content(prompt, stream=True)
-            for chunk in response:
+            response_stream = gemini_client.models.generate_content_stream(
+                model="gemini-2.5-flash",
+                contents=prompt,
+            )
+            for chunk in response_stream:
                 if chunk.text:
                     yield chunk.text
 
