@@ -6,11 +6,10 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from google import genai
+import google.generativeai as genai
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel
 from pypdf import PdfReader
-import requests
 from database import supabase
 
 load_dotenv()
@@ -29,33 +28,38 @@ gemini_api_key = os.getenv("GEMINI_API_KEY")
 if not gemini_api_key:
     raise ValueError("GEMINI_API_KEY is not set in environment variables")
 
-gemini_client = genai.Client(api_key=gemini_api_key)
+genai.configure(api_key=gemini_api_key)
 
-# Direct HTTP embedding call - works 100% reliably with Google AI Studio keys
+# Reliable embedding call using the official GenerativeAI SDK
 def get_embedding(text: str) -> List[float]:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={gemini_api_key}"
-    payload = {
-        "model": "models/text-embedding-004",
-        "content": {
-            "parts": [{"text": text}]
-        }
-    }
-    
-    resp = requests.post(url, json=payload, timeout=20)
-    if resp.status_code != 200:
-        # Fallback to embedding-001 if project has older quotas
-        fallback_url = f"https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent?key={gemini_api_key}"
-        fallback_payload = {
-            "model": "models/embedding-001",
-            "content": {"parts": [{"text": text}]}
-        }
-        resp = requests.post(fallback_url, json=fallback_payload, timeout=20)
+    try:
+        result = genai.embed_content(
+            model="models/text-embedding-004",
+            content=text,
+            task_type="retrieval_document"
+        )
+        return result["embedding"]
+    except Exception as e:
+        # Fallback for search query task type or older model alias
+        try:
+            result = genai.embed_content(
+                model="models/embedding-001",
+                content=text
+            )
+            return result["embedding"]
+        except Exception as e2:
+            raise HTTPException(status_code=500, detail=f"Embedding error: {str(e)} | Fallback error: {str(e2)}")
 
-    if resp.status_code != 200:
-        raise HTTPException(status_code=500, detail=f"Google Embedding API error: {resp.text}")
-
-    data = resp.json()
-    return data["embedding"]["values"]
+def get_query_embedding(text: str) -> List[float]:
+    try:
+        result = genai.embed_content(
+            model="models/text-embedding-004",
+            content=text,
+            task_type="retrieval_query"
+        )
+        return result["embedding"]
+    except Exception:
+        return get_embedding(text)
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1800,
@@ -147,7 +151,7 @@ async def upload_document(file: UploadFile = File(...)):
 @app.post("/search")
 def search_knowledge(search: SearchQuery):
     try:
-        query_vector = get_embedding(search.query)
+        query_vector = get_query_embedding(search.query)
 
         response = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
@@ -162,7 +166,7 @@ def search_knowledge(search: SearchQuery):
 @app.post("/ask-stream")
 def ask_ai_stream(request: AskQuery):
     try:
-        query_vector = get_embedding(request.question)
+        query_vector = get_query_embedding(request.question)
 
         matched_chunks = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
@@ -198,11 +202,9 @@ Answer:"""
             sources_payload = json.dumps({"sources": matched_chunks})
             yield f"{sources_payload}\n"
 
-            response_stream = gemini_client.models.generate_content_stream(
-                model="gemini-2.5-flash",
-                contents=prompt,
-            )
-            for chunk in response_stream:
+            model = genai.GenerativeModel("gemini-2.5-flash")
+            response = model.generate_content(prompt, stream=True)
+            for chunk in response:
                 if chunk.text:
                     yield chunk.text
 

@@ -1,7 +1,7 @@
 fastapi
 uvicorn[standard]
 supabase
-google-genai
+google-generativeai
 pypdf
 langchain-text-splitters
 python-dotenv
