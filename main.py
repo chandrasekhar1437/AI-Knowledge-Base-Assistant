@@ -10,6 +10,7 @@ import google.generativeai as genai
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel
 from pypdf import PdfReader
+import requests
 from database import supabase
 
 load_dotenv()
@@ -30,36 +31,25 @@ if not gemini_api_key:
 
 genai.configure(api_key=gemini_api_key)
 
-# Reliable embedding call using the official GenerativeAI SDK
+# Free Hugging Face Feature Extraction (Outputs 384-dim vectors, uses 0 MB RAM)
+HF_EMBED_URL = "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2"
+
 def get_embedding(text: str) -> List[float]:
     try:
-        result = genai.embed_content(
-            model="models/text-embedding-004",
-            content=text,
-            task_type="retrieval_document"
+        response = requests.post(
+            HF_EMBED_URL,
+            json={"inputs": text},
+            timeout=30
         )
-        return result["embedding"]
-    except Exception as e:
-        # Fallback for search query task type or older model alias
-        try:
-            result = genai.embed_content(
-                model="models/embedding-001",
-                content=text
-            )
-            return result["embedding"]
-        except Exception as e2:
-            raise HTTPException(status_code=500, detail=f"Embedding error: {str(e)} | Fallback error: {str(e2)}")
-
-def get_query_embedding(text: str) -> List[float]:
-    try:
-        result = genai.embed_content(
-            model="models/text-embedding-004",
-            content=text,
-            task_type="retrieval_query"
-        )
-        return result["embedding"]
-    except Exception:
-        return get_embedding(text)
+        if response.status_code == 200:
+            result = response.json()
+            if isinstance(result, list) and len(result) > 0 and isinstance(result[0], list):
+                return result[0]
+            if isinstance(result, list):
+                return result
+        raise ValueError(f"Inference error: {response.text}")
+    except Exception as err:
+        raise HTTPException(status_code=500, detail=f"Embedding API error: {err}")
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1800,
@@ -151,7 +141,7 @@ async def upload_document(file: UploadFile = File(...)):
 @app.post("/search")
 def search_knowledge(search: SearchQuery):
     try:
-        query_vector = get_query_embedding(search.query)
+        query_vector = get_embedding(search.query)
 
         response = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
@@ -166,7 +156,7 @@ def search_knowledge(search: SearchQuery):
 @app.post("/ask-stream")
 def ask_ai_stream(request: AskQuery):
     try:
-        query_vector = get_query_embedding(request.question)
+        query_vector = get_embedding(request.question)
 
         matched_chunks = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
