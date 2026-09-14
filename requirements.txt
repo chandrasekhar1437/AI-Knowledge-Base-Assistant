@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+supabase
+sentence-transformers
+google-genai
+pypdf
+langchain-text-splitters
+python-dotenv
+pydantic
+requests
+streamlit
