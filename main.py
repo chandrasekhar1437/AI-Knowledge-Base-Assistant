@@ -28,53 +28,48 @@ app.add_middleware(
 
 gemini_api_key = os.getenv("GEMINI_API_KEY")
 if not gemini_api_key:
-    raise ValueError("GEMINI_API_KEY is not set.")
+    raise ValueError("GEMINI_API_KEY is not set in environment variables.")
 
 hf_token = os.getenv("HF_TOKEN")
 if not hf_token:
-    raise ValueError("HF_TOKEN is not set.")
+    raise ValueError("HF_TOKEN is not set in environment variables.")
 
 gemini_client = genai.Client(api_key=gemini_api_key)
 
-HF_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
-HF_HEADERS = {
-    "Authorization": f"Bearer {hf_token.strip()}",
-    "Content-Type": "application/json"
-}
+HF_URL = "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2"
 
 def get_embedding(text: str) -> List[float]:
     clean_text = text.replace("\r", " ").strip()
+    headers = {
+        "Authorization": f"Bearer {hf_token.strip()}",
+        "Content-Type": "application/json"
+    }
     payload = {
-        "inputs": [clean_text],
-        "options": {"wait_for_model": True}
+        "inputs": clean_text,
+        "options": {"wait_for_model": True, "use_cache": True}
     }
     
-    for attempt in range(4):
+    last_err = ""
+    for _ in range(5):
         try:
-            res = requests.post(HF_URL, headers=HF_HEADERS, json=payload, timeout=40)
+            res = requests.post(HF_URL, headers=headers, json=payload, timeout=60)
             if res.status_code == 200:
                 data = res.json()
-                if isinstance(data, list) and len(data) > 0:
-                    first_item = data[0]
-                    if isinstance(first_item, list) and len(first_item) > 0 and isinstance(first_item[0], list):
-                        return first_item[0]
-                    if isinstance(first_item, list):
-                        return first_item
-            elif res.status_code == 503:
-                time.sleep(3)
+                if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+                    return data[0]
+                if isinstance(data, list) and len(data) > 0 and isinstance(data[0], (float, int)):
+                    return data
+            elif res.status_code in (503, 504):
+                time.sleep(5)
                 continue
             else:
-                alt_url = "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2"
-                alt_res = requests.post(alt_url, headers=HF_HEADERS, json={"inputs": clean_text}, timeout=40)
-                if alt_res.status_code == 200:
-                    alt_data = alt_res.json()
-                    if isinstance(alt_data, list) and len(alt_data) > 0:
-                        return alt_data[0] if isinstance(alt_data[0], list) else alt_data
-        except requests.RequestException:
+                last_err = res.text
+                time.sleep(2)
+        except requests.RequestException as e:
+            last_err = str(e)
             time.sleep(2)
-            continue
-
-    raise HTTPException(status_code=500, detail="Embedding service unavailable. Please retry.")
+            
+    raise HTTPException(status_code=500, detail=f"HF Embedding Service error: {last_err}")
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1500,
