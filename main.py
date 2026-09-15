@@ -69,7 +69,7 @@ def get_embedding(text: str) -> List[float]:
 
     raise HTTPException(status_code=500, detail=f"HF Embedding error: {last_err}")
 
-# Keeps full rubric sections and phases together
+# Preserves complete rubric tables and phase sections together
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=2000,
     chunk_overlap=400,
@@ -92,9 +92,33 @@ class AskQuery(BaseModel):
     question: str
     history: Optional[List[ChatTurn]] = []
 
+def get_available_gemini_models() -> List[str]:
+    """Queries Google's API directly to find valid models for this API key."""
+    api_key = gemini_api_key.strip()
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            models_data = resp.json().get("models", [])
+            valid_models = [
+                m["name"].replace("models/", "")
+                for m in models_data
+                if "generateContent" in m.get("supportedGenerationMethods", [])
+            ]
+            # Prioritize flash models
+            flash_models = [m for m in valid_models if "flash" in m]
+            other_models = [m for m in valid_models if "flash" not in m]
+            return flash_models + other_models
+        else:
+            print(f"Failed to list models ({resp.status_code}): {resp.text}")
+    except Exception as exc:
+        print(f"Error fetching model list: {exc}")
+    return ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash"]
+
 @app.get("/")
 def home():
-    return {"message": "AI Knowledge Base Assistant API is active."}
+    models = get_available_gemini_models()
+    return {"message": "AI Knowledge Base Assistant API is active.", "available_models": models}
 
 @app.post("/add-knowledge")
 def add_knowledge(item: KnowledgeItem):
@@ -201,7 +225,7 @@ def ask_ai_stream(request: AskQuery):
     try:
         query_vector = get_embedding(request.question)
 
-        # Retrieve 20 chunks to encompass all 14 ingested document chunks
+        # Retrieve up to 20 chunks to include all 14 chunks of the document
         matched_chunks = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
             "match_threshold": 0.0,
@@ -213,7 +237,6 @@ def ask_ai_stream(request: AskQuery):
         else:
             context = "\n\n".join([f"Source: {chunk['title']}\n{chunk['content']}" for chunk in matched_chunks])
 
-        # Exclude fallback strings from conversational memory
         valid_turns = [
             turn for turn in (request.history or [])
             if "I don't find that information" not in turn.content
@@ -229,7 +252,6 @@ STRICT FORMATTING REQUIREMENTS:
 - Structure lists with each item on its own separate line using bullet syntax:
   * **Title**: Description here.
   * **Next Title**: Description here.
-- Never write continuous inline lists or glue headers into bullet text.
 - If the answer is not present in the Document Context, reply exactly: "I don't find that information in the uploaded documents."
 
 Document Context:
@@ -245,45 +267,41 @@ Answer:"""
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"__SOURCES__{sources_payload}__ENDSOURCES__\n"
 
-            # Includes the 3.0-flash endpoint requested by your API return error
-            model_targets = [
-                ("v1beta", "gemini-3.0-flash"),
-                ("v1beta", "gemini-2.5-flash"),
-                ("v1beta", "gemini-1.5-flash"),
-                ("v1", "gemini-1.5-flash"),
-                ("v1", "gemini-2.5-flash")
-            ]
-            body = {"contents": [{"parts": [{"text": prompt}]}]}
             api_key = gemini_api_key.strip()
+            available = get_available_gemini_models()
+            print(f"Dynamically discovered models: {available}")
+
+            body = {"contents": [{"parts": [{"text": prompt}]}]}
             headers = {
                 "Content-Type": "application/json",
                 "x-goog-api-key": api_key
             }
 
-            for api_version, model_name in model_targets:
-                url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model_name}:streamGenerateContent?alt=sse&key={api_key}"
-                try:
-                    with requests.post(url, headers=headers, json=body, stream=True, timeout=(10, 60)) as resp:
-                        if resp.status_code == 200:
-                            for line in resp.iter_lines():
-                                if line:
-                                    decoded = line.decode("utf-8")
-                                    if decoded.startswith("data: "):
-                                        try:
-                                            chunk_data = json.loads(decoded[6:])
-                                            parts = chunk_data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-                                            for p in parts:
-                                                txt = p.get("text", "")
-                                                if txt:
-                                                    yield txt
-                                        except Exception:
-                                            continue
-                            return
-                        else:
-                            print(f"Gemini API returned status {resp.status_code} for {model_name} on {api_version}: {resp.text}")
-                except Exception as exc:
-                    print(f"Connection exception with {model_name} on {api_version}: {exc}")
-                    continue
+            for model_name in available:
+                for api_ver in ["v1beta", "v1"]:
+                    url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{model_name}:streamGenerateContent?alt=sse&key={api_key}"
+                    try:
+                        with requests.post(url, headers=headers, json=body, stream=True, timeout=(10, 60)) as resp:
+                            if resp.status_code == 200:
+                                for line in resp.iter_lines():
+                                    if line:
+                                        decoded = line.decode("utf-8")
+                                        if decoded.startswith("data: "):
+                                            try:
+                                                chunk_data = json.loads(decoded[6:])
+                                                parts = chunk_data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                                                for p in parts:
+                                                    txt = p.get("text", "")
+                                                    if txt:
+                                                        yield txt
+                                            except Exception:
+                                                continue
+                                return
+                            else:
+                                print(f"Model {model_name} on {api_ver} failed ({resp.status_code}): {resp.text}")
+                    except Exception as exc:
+                        print(f"Model {model_name} exception: {exc}")
+                        continue
 
             yield "I don't find that information in the uploaded documents."
 
