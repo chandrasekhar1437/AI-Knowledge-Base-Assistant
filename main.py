@@ -36,9 +36,8 @@ if not hf_token:
 
 gemini_client = genai.Client(api_key=gemini_api_key)
 
-# Dedicated feature-extraction endpoint
-HF_URL = "https://router.huggingface.co/hf-inference/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
-HF_FALLBACK_URL = "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2"
+# Native Feature Extraction endpoint (384 dimensions)
+HF_EMBED_URL = "https://router.huggingface.co/hf-inference/models/BAAI/bge-small-en-v1.5"
 
 def get_embedding(text: str) -> List[float]:
     clean_text = text.replace("\r", " ").strip()
@@ -46,42 +45,32 @@ def get_embedding(text: str) -> List[float]:
         "Authorization": f"Bearer {hf_token.strip()}",
         "Content-Type": "application/json",
         "X-Wait-For-Model": "true",
-        "X-Use-Cache": "false"
+        "X-Use-Cache": "true"
     }
-    
-    # We pass the prompt as inputs and tell the model to compute pooled mean embeddings
-    payload = {
-        "inputs": clean_text,
-        "parameters": {"pooling": "mean", "normalize": True}
-    }
-    
-    # Try the pipeline feature-extraction URL first, then fallback
-    endpoints = [HF_URL, HF_FALLBACK_URL]
-    last_error = ""
+    payload = {"inputs": clean_text}
 
-    for url in endpoints:
-        for _ in range(3):
-            try:
-                res = requests.post(url, headers=headers, json=payload, timeout=45)
-                if res.status_code == 200:
-                    data = res.json()
-                    # Response can be: [[0.1, 0.2...]] or [0.1, 0.2...]
-                    if isinstance(data, list) and len(data) > 0:
-                        if isinstance(data[0], list):
-                            return data[0]
-                        if isinstance(data[0], (float, int)):
-                            return data
-                elif res.status_code in (503, 504):
-                    time.sleep(3)
-                    continue
-                else:
-                    last_error = res.text
-            except requests.RequestException as e:
-                last_error = str(e)
-                time.sleep(2)
+    last_err = ""
+    for attempt in range(5):
+        try:
+            res = requests.post(HF_EMBED_URL, headers=headers, json=payload, timeout=60)
+            if res.status_code == 200:
+                data = res.json()
+                if isinstance(data, list) and len(data) > 0:
+                    if isinstance(data[0], list):
+                        return data[0]
+                    if isinstance(data[0], (float, int)):
+                        return data
+            elif res.status_code in (503, 504):
+                time.sleep(5)
                 continue
+            else:
+                last_err = res.text
+                time.sleep(2)
+        except requests.RequestException as exc:
+            last_err = str(exc)
+            time.sleep(2)
 
-    raise HTTPException(status_code=500, detail=f"HF Embedding Error: {last_error}")
+    raise HTTPException(status_code=500, detail=f"HF Embedding error: {last_err}")
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1500,
