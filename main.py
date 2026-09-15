@@ -69,7 +69,7 @@ def get_embedding(text: str) -> List[float]:
 
     raise HTTPException(status_code=500, detail=f"HF Embedding error: {last_err}")
 
-# Increased chunk_size to 2000 and overlap to 400 so sections and rubrics remain together
+# Chunk size preserves complete rubric tables and phase sections together
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=2000,
     chunk_overlap=400,
@@ -128,22 +128,27 @@ async def upload_document(file: UploadFile = File(...)):
         elif filename.endswith(".docx"):
             docx_bytes = await file.read()
             doc = docx.Document(io.BytesIO(docx_bytes))
-            
-            # Extract standard paragraphs
-            for p in doc.paragraphs:
-                if p.text.strip():
-                    content_text += p.text.strip() + "\n\n"
-            
-            # Extract tables, rubrics, and criteria grids
-            for table in doc.tables:
-                for row in table.rows:
-                    seen_cells = []
-                    for cell in row.cells:
-                        txt = cell.text.strip().replace("\n", " ")
-                        if txt and (not seen_cells or txt != seen_cells[-1]):
-                            seen_cells.append(txt)
-                    if seen_cells:
-                        content_text += " | ".join(seen_cells) + "\n\n"
+
+            # Preserve natural sequential reading order for paragraphs and tables
+            for element in doc.element.body:
+                if element.tag.endswith("p"):
+                    p_text = "".join(node.text for node in element.iter() if node.text and node.tag.endswith("t")).strip()
+                    if p_text:
+                        content_text += p_text + "\n\n"
+                elif element.tag.endswith("tbl"):
+                    for row in element.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tr"):
+                        cells = []
+                        for cell in row.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tc"):
+                            cell_text = "".join(node.text for node in cell.iter() if node.text and node.tag.endswith("t")).strip().replace("\n", " ")
+                            if cell_text:
+                                cells.append(cell_text)
+                        
+                        seen = []
+                        for c in cells:
+                            if not seen or c != seen[-1]:
+                                seen.append(c)
+                        if seen:
+                            content_text += " | ".join(seen) + "\n\n"
         elif filename.endswith(".txt"):
             content_bytes = await file.read()
             content_text = content_bytes.decode("utf-8")
@@ -196,7 +201,6 @@ def ask_ai_stream(request: AskQuery):
     try:
         query_vector = get_embedding(request.question)
 
-        # Retrieve top 15 chunks with 0.0 threshold to avoid drops
         matched_chunks = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
             "match_threshold": 0.0,
@@ -208,7 +212,6 @@ def ask_ai_stream(request: AskQuery):
         else:
             context = "\n\n".join([f"Source: {chunk['title']}\n{chunk['content']}" for chunk in matched_chunks])
 
-        # Filter out prior fallback loops so they do not bias LLM generation
         valid_turns = [
             turn for turn in (request.history or [])
             if "I don't find that information" not in turn.content
