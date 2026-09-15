@@ -3,6 +3,7 @@ import json
 import os
 import time
 from typing import List, Optional
+import docx
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,7 +34,6 @@ hf_token = os.getenv("HF_TOKEN")
 if not hf_token:
     raise ValueError("HF_TOKEN is not set in environment variables.")
 
-# Hugging Face Feature Extraction (384 dimensions)
 HF_EMBED_URL = "https://router.huggingface.co/hf-inference/models/BAAI/bge-small-en-v1.5"
 
 def get_embedding(text: str) -> List[float]:
@@ -124,6 +124,12 @@ async def upload_document(file: UploadFile = File(...)):
                 extracted = page.extract_text()
                 if extracted:
                     content_text += extracted + "\n"
+        elif filename.endswith(".docx"):
+            docx_bytes = await file.read()
+            doc = docx.Document(io.BytesIO(docx_bytes))
+            for p in doc.paragraphs:
+                if p.text.strip():
+                    content_text += p.text.strip() + "\n"
         elif filename.endswith(".txt"):
             content_bytes = await file.read()
             content_text = content_bytes.decode("utf-8")
@@ -134,7 +140,7 @@ async def upload_document(file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail="The file contains no readable text.")
 
         chunks = text_splitter.split_text(content_text)
-        clean_name = filename.replace(".pdf", "").replace(".txt", "").replace("_", " ")
+        clean_name = filename.replace(".pdf", "").replace(".docx", "").replace(".txt", "").replace("_", " ")
 
         rows_to_insert = []
         for idx, chunk in enumerate(chunks):
@@ -211,11 +217,9 @@ User Question: {request.question}
 Final Answer:"""
 
         def token_generator():
-            # Metadata JSON line consumed by Streamlit for source citations
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"{sources_payload}\n"
 
-            # Dynamic model discovery prioritizing Flash variants
             candidate_models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-pro"]
             try:
                 list_res = requests.get(

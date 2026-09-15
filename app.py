@@ -1,126 +1,192 @@
 import json
-import streamlit as st
+import os
 import requests
+import streamlit as st
 
-# Live Render backend URL with fallback for local development
-DEFAULT_API_URL = "https://ai-knowledge-base-assistant-omgm.onrender.com"
-API_URL = st.secrets.get("API_URL", DEFAULT_API_URL)
+st.set_page_config(
+    page_title="AI Knowledge Base Assistant",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-st.set_page_config(page_title="AI Knowledge Base Assistant", page_icon="🤖", layout="wide")
-st.title("🤖 AI Knowledge Base Assistant")
+# Backend Render API Base URL
+API_URL = os.getenv("API_URL", "https://ai-knowledge-base-assistant-omgm.onrender.com")
 
-# Sidebar Controls
-with st.sidebar:
-    st.header("📄 Upload Document")
-    uploaded_file = st.file_uploader("Upload a PDF or TXT file", type=["pdf", "txt"])
-    
-    if uploaded_file and st.button("Process & Ingest", use_container_width=True):
-        with st.spinner("Chunking, embedding, and saving to Supabase..."):
-            files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
-            try:
-                res = requests.post(f"{API_URL}/upload-document", files=files, timeout=60)
-                if res.status_code == 200:
-                    data = res.json()
-                    st.success(f"Ingested {data['chunks_created']} chunks from '{data['filename']}'!")
-                else:
-                    st.error(f"Upload failed: {res.text}")
-            except Exception as e:
-                st.error(f"Connection error: {e}")
+# Custom CSS for dark-themed UI polish
+st.markdown(
+    """
+    <style>
+    .main {
+        background-color: #0e1117;
+    }
+    .stChatMessage {
+        border-radius: 10px;
+        margin-bottom: 0.8rem;
+    }
+    .source-box {
+        background-color: #1e232f;
+        border-left: 4px solid #4f8bf9;
+        padding: 0.8rem 1rem;
+        margin-top: 0.5rem;
+        margin-bottom: 0.5rem;
+        border-radius: 4px;
+        font-size: 0.9rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-    st.markdown("---")
-    st.header("✏️ Add Knowledge Manually")
-    title = st.text_input("Title")
-    content = st.text_area("Content", height=100)
-    
-    if st.button("Save Manual Entry", use_container_width=True):
-        if title.strip() and content.strip():
-            try:
-                res = requests.post(f"{API_URL}/add-knowledge", json={"title": title, "content": content}, timeout=30)
-                if res.status_code == 200:
-                    st.success("Entry added successfully!")
-                else:
-                    st.error("Failed to add entry.")
-            except Exception as e:
-                st.error(f"Connection error: {e}")
-        else:
-            st.warning("Please provide both a title and content.")
-
-    st.markdown("---")
-    if st.button("🗑️ Clear Chat History", use_container_width=True):
-        st.session_state.messages = []
-        st.rerun()
-
-# Initialize Chat History
+# Initialize Session State for Chat
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Render Previous Chat Turns
+# --- SIDEBAR: Ingestion & Controls ---
+with st.sidebar:
+    st.title("📄 Ingestion Hub")
+    
+    # 1. Document Uploader (supports PDF, DOCX, TXT)
+    st.subheader("Upload Document")
+    uploaded_file = st.file_uploader(
+        "Upload a PDF, DOCX, or TXT file",
+        type=["pdf", "docx", "txt"],
+        help="Embeds your document directly into the vector database."
+    )
+    
+    if st.button("Process & Ingest", use_container_width=True):
+        if uploaded_file is not None:
+            with st.spinner("Chunking, embedding, and storing in Supabase..."):
+                try:
+                    files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
+                    response = requests.post(f"{API_URL}/upload-document", files=files, timeout=90)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        chunks = data.get("chunks_created", 0)
+                        st.success(f"Ingested {chunks} chunks from '{uploaded_file.name}'!")
+                    else:
+                        st.error(f"Upload failed: {response.text}")
+                except Exception as e:
+                    st.error(f"Connection error: {str(e)}")
+        else:
+            st.warning("Please choose a file first.")
+
+    st.markdown("---")
+
+    # 2. Add Knowledge Manually
+    st.subheader("✍️ Add Knowledge Manually")
+    with st.form("manual_entry_form", clear_on_submit=True):
+        entry_title = st.text_input("Title", placeholder="e.g. Availability & Preferences")
+        entry_content = st.text_area("Content", placeholder="Enter specific facts, project details, or notes...", height=120)
+        submit_manual = st.form_submit_button("Save Manual Entry", use_container_width=True)
+
+        if submit_manual:
+            if entry_title.strip() and entry_content.strip():
+                with st.spinner("Embedding and storing entry..."):
+                    try:
+                        payload = {"title": entry_title.strip(), "content": entry_content.strip()}
+                        res = requests.post(f"{API_URL}/add-knowledge", json=payload, timeout=30)
+                        if res.status_code == 200:
+                            st.success("Entry added successfully!")
+                        else:
+                            st.error(f"Failed to add entry: {res.text}")
+                    except Exception as err:
+                        st.error(f"Request failed: {str(err)}")
+            else:
+                st.warning("Both Title and Content are required.")
+
+    st.markdown("---")
+    
+    # 3. Chat Control
+    if st.button("Clear Chat History", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+
+# --- MAIN PANEL: Chat Interface ---
+st.title("🤖 AI Knowledge Base Assistant")
+st.caption("Context-aware retrieval powered by Supabase pgvector & Gemini Flash")
+
+# Render previous messages
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        st.write(msg["content"])
+        st.markdown(msg["content"])
         if msg.get("sources"):
             with st.expander("View Retrieved Sources"):
-                for src in msg["sources"]:
-                    similarity_val = src.get("similarity", 0)
-                    st.markdown(f"**{src.get('title', 'Unknown')}** (Similarity: `{similarity_val:.2f}`)")
+                for idx, src in enumerate(msg["sources"]):
+                    similarity = src.get("similarity", 0.0)
+                    st.markdown(f"**{src.get('title', 'Unknown')}** (Similarity: `{similarity:.2f}`)")
                     st.caption(src.get("content", ""))
+                    if idx < len(msg["sources"]) - 1:
+                        st.divider()
 
-# Chat Interaction
-user_query = st.chat_input("Ask a question about your knowledge base...")
-if user_query:
+# Input for new user question
+if prompt := st.chat_input("Ask a question about your knowledge base..."):
+    # Append & display user prompt
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # Prepare chat history for context
     history_payload = [
         {"role": m["role"], "content": m["content"]}
-        for m in st.session_state.messages
+        for m in st.session_state.messages[:-1]
     ]
 
-    st.session_state.messages.append({"role": "user", "content": user_query})
-    with st.chat_message("user"):
-        st.write(user_query)
-
+    # Generate streaming assistant response
     with st.chat_message("assistant"):
-        def stream_generator():
-            try:
-                with requests.post(
-                    f"{API_URL}/ask-stream",
-                    json={"question": user_query, "history": history_payload},
-                    stream=True,
-                    timeout=60
-                ) as res:
-                    if res.status_code != 200:
-                        yield f"API Error {res.status_code}: {res.text}"
-                        return
+        response_placeholder = st.empty()
+        full_response = ""
+        retrieved_sources = []
 
-                    iterator = res.iter_lines(decode_unicode=True)
-                    first_line = next(iterator, None)
-                    sources = []
-                    if first_line:
-                        try:
-                            meta = json.loads(first_line)
-                            sources = meta.get("sources", [])
-                            st.session_state._current_sources = sources
-                        except json.JSONDecodeError:
-                            yield first_line
+        try:
+            req_body = {
+                "question": prompt,
+                "history": history_payload
+            }
 
-                    for chunk in iterator:
+            with requests.post(f"{API_URL}/ask-stream", json=req_body, stream=True, timeout=60) as resp:
+                if resp.status_code == 200:
+                    first_line = True
+                    for chunk in resp.iter_lines():
                         if chunk:
-                            yield chunk + "\n"
+                            line_text = chunk.decode("utf-8")
+                            
+                            # First line contains the sources JSON
+                            if first_line:
+                                first_line = False
+                                try:
+                                    meta = json.loads(line_text)
+                                    retrieved_sources = meta.get("sources", [])
+                                    continue
+                                except Exception:
+                                    # Fallback if first line isn't metadata
+                                    full_response += line_text
+                                    response_placeholder.markdown(full_response + "▌")
+                                    continue
+                            
+                            full_response += line_text
+                            response_placeholder.markdown(full_response + "▌")
 
-            except Exception as err:
-                yield f"Connection failed: {err}"
+                    response_placeholder.markdown(full_response)
+                    
+                    if retrieved_sources:
+                        with st.expander("View Retrieved Sources"):
+                            for idx, src in enumerate(retrieved_sources):
+                                similarity = src.get("similarity", 0.0)
+                                st.markdown(f"**{src.get('title', 'Unknown')}** (Similarity: `{similarity:.2f}`)")
+                                st.caption(src.get("content", ""))
+                                if idx < len(retrieved_sources) - 1:
+                                    st.divider()
 
-        st.session_state._current_sources = []
-        full_response = st.write_stream(stream_generator())
-
-        current_sources = st.session_state.get("_current_sources", [])
-        if current_sources:
-            with st.expander("View Retrieved Sources"):
-                for src in current_sources:
-                    similarity_val = src.get("similarity", 0)
-                    st.markdown(f"**{src.get('title', 'Unknown')}** (Similarity: `{similarity_val:.2f}`)")
-                    st.caption(src.get("content", ""))
-
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": full_response,
-            "sources": current_sources
-        })
+                    # Save complete response to state
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": full_response,
+                        "sources": retrieved_sources
+                    })
+                else:
+                    err_msg = f"Server error ({resp.status_code}): {resp.text}"
+                    response_placeholder.error(err_msg)
+        except Exception as e:
+            response_placeholder.error(f"Error fetching response: {str(e)}")
