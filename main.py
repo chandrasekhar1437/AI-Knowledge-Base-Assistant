@@ -127,9 +127,22 @@ async def upload_document(file: UploadFile = File(...)):
         elif filename.endswith(".docx"):
             docx_bytes = await file.read()
             doc = docx.Document(io.BytesIO(docx_bytes))
+            
+            # Extract standard paragraphs
             for p in doc.paragraphs:
                 if p.text.strip():
                     content_text += p.text.strip() + "\n"
+            
+            # Extract tables, rubrics, and criteria grids
+            for table in doc.tables:
+                for row in table.rows:
+                    seen_cells = []
+                    for cell in row.cells:
+                        txt = cell.text.strip().replace("\n", " ")
+                        if txt and (not seen_cells or txt != seen_cells[-1]):
+                            seen_cells.append(txt)
+                    if seen_cells:
+                        content_text += " | ".join(seen_cells) + "\n"
         elif filename.endswith(".txt"):
             content_bytes = await file.read()
             content_text = content_bytes.decode("utf-8")
@@ -218,7 +231,6 @@ Question: {request.question}
 Answer:"""
 
         def token_generator():
-            # Send source metadata as the first line for frontend display
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"{sources_payload}\n"
 
