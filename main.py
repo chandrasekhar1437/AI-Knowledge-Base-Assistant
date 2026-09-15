@@ -181,8 +181,8 @@ def ask_ai_stream(request: AskQuery):
 
         matched_chunks = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
-            "match_threshold": 0.10,
-            "match_count": 8
+            "match_threshold": 0.05,
+            "match_count": 6
         }).execute().data
 
         if not matched_chunks:
@@ -198,7 +198,7 @@ def ask_ai_stream(request: AskQuery):
         prompt = f"""You are an intelligent document and knowledge base assistant.
 Answer the user's question clearly, thoroughly, and factually using the relevant document context and chat history below.
 Preserve exact dates, skills, links, tools, and technical specifications.
-If the answer is completely absent from the context and chat history, say: "The knowledge base doesn't contain this information."
+If the answer is completely absent from the context and chat history, state clearly what you can and cannot find.
 
 Relevant Document Context:
 {context}
@@ -210,16 +210,20 @@ Question: {request.question}
 Answer:"""
 
         def token_generator():
-            sources_payload = json.dumps({"sources": matched_chunks})
+            # First line: metadata JSON for frontend source citations
+            sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"{sources_payload}\n"
 
-            stream = gemini_client.models.generate_content_stream(
-                model="gemini-2.5-flash",
-                contents=prompt,
-            )
-            for chunk in stream:
-                if chunk.text:
-                    yield chunk.text
+            try:
+                stream = gemini_client.models.generate_content_stream(
+                    model="gemini-1.5-flash",
+                    contents=prompt,
+                )
+                for chunk in stream:
+                    if chunk.text:
+                        yield chunk.text
+            except Exception as stream_err:
+                yield f"\n\n[Generation error: {str(stream_err)}]"
 
         return StreamingResponse(token_generator(), media_type="text/plain")
 
