@@ -36,8 +36,14 @@ if not hf_token:
 
 HF_EMBED_URL = "https://router.huggingface.co/hf-inference/models/BAAI/bge-small-en-v1.5"
 
+def clean_text_for_postgres(text: str) -> str:
+    """Removes null bytes and invalid characters that cause PostgreSQL 22P05 errors."""
+    if not text:
+        return ""
+    return text.replace("\x00", "").replace("\u0000", "")
+
 def get_embedding(text: str) -> List[float]:
-    clean_text = text.replace("\r", " ").strip()
+    clean_text = clean_text_for_postgres(text).replace("\r", " ").strip()
     headers = {
         "Authorization": f"Bearer {hf_token.strip()}",
         "Content-Type": "application/json",
@@ -119,12 +125,14 @@ def home():
 @app.post("/add-knowledge")
 def add_knowledge(item: KnowledgeItem):
     try:
-        text_to_embed = f"{item.title}: {item.content}"
+        clean_title = clean_text_for_postgres(item.title)
+        clean_content = clean_text_for_postgres(item.content)
+        text_to_embed = f"{clean_title}: {clean_content}"
         vector = get_embedding(text_to_embed)
 
         response = supabase.table("knowledge_base").insert({
-            "title": item.title,
-            "content": item.content,
+            "title": clean_title,
+            "content": clean_content,
             "embedding": vector
         }).execute()
 
@@ -144,7 +152,7 @@ async def upload_document(file: UploadFile = File(...)):
             for page in reader.pages:
                 extracted = page.extract_text()
                 if extracted:
-                    content_text += extracted + "\n\n"
+                    content_text += clean_text_for_postgres(extracted) + "\n\n"
         elif filename.endswith(".docx"):
             docx_bytes = await file.read()
             doc = docx.Document(io.BytesIO(docx_bytes))
@@ -153,14 +161,14 @@ async def upload_document(file: UploadFile = File(...)):
                 if element.tag.endswith("p"):
                     p_text = "".join(node.text for node in element.iter() if node.text and node.tag.endswith("t")).strip()
                     if p_text:
-                        content_text += p_text + "\n\n"
+                        content_text += clean_text_for_postgres(p_text) + "\n\n"
                 elif element.tag.endswith("tbl"):
                     for row in element.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tr"):
                         cells = []
                         for cell in row.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tc"):
                             cell_text = "".join(node.text for node in cell.iter() if node.text and node.tag.endswith("t")).strip().replace("\n", " ")
                             if cell_text:
-                                cells.append(cell_text)
+                                cells.append(clean_text_for_postgres(cell_text))
 
                         seen = []
                         for c in cells:
@@ -170,11 +178,12 @@ async def upload_document(file: UploadFile = File(...)):
                             content_text += " | ".join(seen) + "\n\n"
         elif filename.endswith(".txt"):
             content_bytes = await file.read()
-            content_text = content_bytes.decode("utf-8")
+            content_text = clean_text_for_postgres(content_bytes.decode("utf-8", errors="ignore"))
         else:
             raise HTTPException(status_code=400, detail="Unsupported file format.")
 
-        if not content_text.strip():
+        content_text = clean_text_for_postgres(content_text).strip()
+        if not content_text:
             raise HTTPException(status_code=400, detail="The file contains no readable text.")
 
         chunks = text_splitter.split_text(content_text)
@@ -182,7 +191,8 @@ async def upload_document(file: UploadFile = File(...)):
 
         rows_to_insert = []
         for idx, chunk in enumerate(chunks):
-            enriched_content = f"Document: {clean_name}\nSection {idx + 1}:\n{chunk}"
+            sanitized_chunk = clean_text_for_postgres(chunk)
+            enriched_content = f"Document: {clean_name}\nSection {idx + 1}:\n{sanitized_chunk}"
             vector = get_embedding(enriched_content)
             rows_to_insert.append({
                 "title": f"{filename} (part {idx + 1})",
@@ -203,7 +213,8 @@ async def upload_document(file: UploadFile = File(...)):
 @app.post("/search")
 def search_knowledge(search: SearchQuery):
     try:
-        query_vector = get_embedding(search.query)
+        clean_query = clean_text_for_postgres(search.query)
+        query_vector = get_embedding(clean_query)
 
         response = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
@@ -211,14 +222,15 @@ def search_knowledge(search: SearchQuery):
             "match_count": search.limit
         }).execute()
 
-        return {"query": search.query, "results": response.data}
+        return {"query": clean_query, "results": response.data}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 @app.post("/ask-stream")
 def ask_ai_stream(request: AskQuery):
     try:
-        query_vector = get_embedding(request.question)
+        clean_question = clean_text_for_postgres(request.question)
+        query_vector = get_embedding(clean_question)
 
         matched_chunks = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
@@ -229,31 +241,26 @@ def ask_ai_stream(request: AskQuery):
         if not matched_chunks:
             context = "No relevant context found in the knowledge base."
         else:
-            context = "\n\n".join([f"Source: {chunk['title']}\n{chunk['content']}" for chunk in matched_chunks])
+            context = "\n\n".join([f"Source: {chunk['title']}\n{clean_text_for_postgres(chunk['content'])}" for chunk in matched_chunks])
 
         valid_turns = [
             turn for turn in (request.history or [])
             if "I don't find that information" not in turn.content
         ]
         recent_turns = valid_turns[-4:]
-        formatted_history = "\n".join([f"{turn.role.capitalize()}: {turn.content}" for turn in recent_turns]) if recent_turns else "None."
+        formatted_history = "\n".join([f"{turn.role.capitalize()}: {clean_text_for_postgres(turn.content)}" for turn in recent_turns]) if recent_turns else "None."
 
-        user_content = f"""Document Context:
+        user_content = f"""Reference Context:
 {context}
 
 Prior Conversation:
 {formatted_history}
 
-Question: {request.question}"""
+Question: {clean_question}
 
-        system_instruction = (
-            "You are a professional documentation assistant. Answer the user's question clearly and accurately using ONLY the provided Document Context. "
-            "Output ONLY the final answer formatted in clean Markdown bullets. Do not output instructions, constraints, or thinking steps. "
-            "If the answer is not present in the Document Context, reply exactly: 'I don't find that information in the uploaded documents.'"
-        )
+Instruction: Answer the question directly using only the reference context above. Return only the clean Markdown bulleted answer with no meta-announcements, thinking steps, or echoed prompts."""
 
         def token_generator():
-            # Send sources payload immediately so the HTTP stream begins instantly
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"__SOURCES__{sources_payload}__ENDSOURCES__\n"
 
@@ -261,13 +268,13 @@ Question: {request.question}"""
             active_models = fetch_active_models(api_key)
 
             body = {
-                "system_instruction": {
-                    "parts": [{"text": system_instruction}]
-                },
                 "contents": [{"parts": [{"text": user_content}]}],
                 "generationConfig": {
-                    "temperature": 0.1,
-                    "maxOutputTokens": 1024
+                    "temperature": 0.0,
+                    "maxOutputTokens": 1024,
+                    "thinkingConfig": {
+                        "thinkingBudget": 0
+                    }
                 }
             }
             headers = {
