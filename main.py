@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import time
 from typing import List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -27,33 +28,53 @@ app.add_middleware(
 
 gemini_api_key = os.getenv("GEMINI_API_KEY")
 if not gemini_api_key:
-    raise ValueError("GEMINI_API_KEY is not configured in environment variables.")
+    raise ValueError("GEMINI_API_KEY is not set.")
+
+hf_token = os.getenv("HF_TOKEN")
+if not hf_token:
+    raise ValueError("HF_TOKEN is not set.")
 
 gemini_client = genai.Client(api_key=gemini_api_key)
 
-# Direct v1 embedding call (768 dimensions, universally enabled across all Google AI Studio keys)
+HF_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
+HF_HEADERS = {
+    "Authorization": f"Bearer {hf_token.strip()}",
+    "Content-Type": "application/json"
+}
+
 def get_embedding(text: str) -> List[float]:
-    url = f"https://generativelanguage.googleapis.com/v1/models/embedding-001:embedContent?key={gemini_api_key}"
+    clean_text = text.replace("\r", " ").strip()
     payload = {
-        "content": {
-            "parts": [{"text": text}]
-        }
+        "inputs": [clean_text],
+        "options": {"wait_for_model": True}
     }
     
-    resp = requests.post(url, json=payload, timeout=30)
-    
-    if resp.status_code == 200:
-        data = resp.json()
-        return data["embedding"]["values"]
-        
-    # Fallback to v1beta text-embedding-004 if available
-    fallback_url = f"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={gemini_api_key}"
-    fb_resp = requests.post(fallback_url, json=payload, timeout=30)
-    if fb_resp.status_code == 200:
-        data = fb_resp.json()
-        return data["embedding"]["values"]
+    for attempt in range(4):
+        try:
+            res = requests.post(HF_URL, headers=HF_HEADERS, json=payload, timeout=40)
+            if res.status_code == 200:
+                data = res.json()
+                if isinstance(data, list) and len(data) > 0:
+                    first_item = data[0]
+                    if isinstance(first_item, list) and len(first_item) > 0 and isinstance(first_item[0], list):
+                        return first_item[0]
+                    if isinstance(first_item, list):
+                        return first_item
+            elif res.status_code == 503:
+                time.sleep(3)
+                continue
+            else:
+                alt_url = "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2"
+                alt_res = requests.post(alt_url, headers=HF_HEADERS, json={"inputs": clean_text}, timeout=40)
+                if alt_res.status_code == 200:
+                    alt_data = alt_res.json()
+                    if isinstance(alt_data, list) and len(alt_data) > 0:
+                        return alt_data[0] if isinstance(alt_data[0], list) else alt_data
+        except requests.RequestException:
+            time.sleep(2)
+            continue
 
-    raise HTTPException(status_code=500, detail=f"Embedding API error: {resp.text}")
+    raise HTTPException(status_code=500, detail="Embedding service unavailable. Please retry.")
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1500,
@@ -114,10 +135,10 @@ async def upload_document(file: UploadFile = File(...)):
             content_bytes = await file.read()
             content_text = content_bytes.decode("utf-8")
         else:
-            raise HTTPException(status_code=400, detail="Unsupported file format. Provide a PDF or TXT file.")
+            raise HTTPException(status_code=400, detail="Unsupported file format.")
 
         if not content_text.strip():
-            raise HTTPException(status_code=400, detail="The provided document contains no parseable text.")
+            raise HTTPException(status_code=400, detail="The file contains no readable text.")
 
         chunks = text_splitter.split_text(content_text)
         clean_name = filename.replace(".pdf", "").replace(".txt", "").replace("_", " ")
