@@ -36,15 +36,21 @@ if not hf_token:
 
 gemini_client = genai.Client(api_key=gemini_api_key)
 
-HF_API_URL = "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2"
-HF_HEADERS = {"Authorization": f"Bearer {hf_token}"}
+# Active Hugging Face Serverless Router Endpoint
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2"
+HF_HEADERS = {
+    "Authorization": f"Bearer {hf_token}",
+    "Content-Type": "application/json"
+}
 
-# Free, fast serverless cloud embeddings (384 dimensions)
 def get_embedding(text: str) -> List[float]:
-    payload = {"inputs": text, "options": {"wait_for_model": True}}
+    payload = {
+        "inputs": text,
+        "options": {"wait_for_model": True}
+    }
     
-    for attempt in range(3):
-        res = requests.post(HF_API_URL, headers=HF_HEADERS, json=payload, timeout=45)
+    for _ in range(3):
+        res = requests.post(HF_API_URL, headers=HF_HEADERS, json=payload, timeout=30)
         if res.status_code == 200:
             data = res.json()
             if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
@@ -52,8 +58,7 @@ def get_embedding(text: str) -> List[float]:
             if isinstance(data, list) and isinstance(data[0], (float, int)):
                 return data
         elif res.status_code == 503:
-            # Model is loading on HF cold start, wait briefly
-            time.sleep(4)
+            time.sleep(3)
             continue
         else:
             raise HTTPException(status_code=500, detail=f"HuggingFace embedding error: {res.text}")
