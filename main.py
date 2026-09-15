@@ -69,9 +69,10 @@ def get_embedding(text: str) -> List[float]:
 
     raise HTTPException(status_code=500, detail=f"HF Embedding error: {last_err}")
 
+# Increased chunk_size to 2000 and overlap to 400 so sections and rubrics remain together
 text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1200,
-    chunk_overlap=250,
+    chunk_size=2000,
+    chunk_overlap=400,
     separators=["\n\n", "\n", ". ", " ", ""]
 )
 
@@ -195,7 +196,7 @@ def ask_ai_stream(request: AskQuery):
     try:
         query_vector = get_embedding(request.question)
 
-        # Retrieve top 15 chunks with 0.0 threshold to avoid strict cosine drops
+        # Retrieve top 15 chunks with 0.0 threshold to avoid drops
         matched_chunks = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
             "match_threshold": 0.0,
