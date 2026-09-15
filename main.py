@@ -245,13 +245,24 @@ Answer:"""
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"__SOURCES__{sources_payload}__ENDSOURCES__\n"
 
-            # Targets active Gemini 2.5 and 2.0 Flash models to prevent 503 capacity bottlenecks
-            model_targets = [
-                ("v1beta", "gemini-2.5-flash"),
-                ("v1beta", "gemini-2.0-flash"),
-                ("v1beta", "gemini-2.5-flash-lite"),
-                ("v1beta", "gemini-1.5-flash")
-            ]
+            # Check if retrieved chunks are from a PDF
+            is_pdf = any(".pdf" in chunk.get("title", "").lower() for chunk in (matched_chunks or []))
+
+            # Route models dynamically based on file type
+            if is_pdf:
+                model_targets = [
+                    ("v1beta", "gemini-2.5-flash"),
+                    ("v1beta", "gemini-2.0-flash"),
+                    ("v1beta", "gemini-2.5-flash-lite")
+                ]
+            else:
+                model_targets = [
+                    ("v1beta", "gemini-3.0-flash"),
+                    ("v1beta", "gemini-2.5-flash"),
+                    ("v1beta", "gemini-2.0-flash"),
+                    ("v1beta", "gemini-2.5-flash-lite")
+                ]
+
             body = {"contents": [{"parts": [{"text": prompt}]}]}
             api_key = gemini_api_key.strip()
             headers = {
