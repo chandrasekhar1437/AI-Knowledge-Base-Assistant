@@ -243,7 +243,8 @@ Answer:"""
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"__SOURCES__{sources_payload}__ENDSOURCES__\n"
 
-            candidate_models = ["gemini-1.5-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
+            # Updated to active available endpoints to resolve 404 errors
+            candidate_models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
             body = {"contents": [{"parts": [{"text": prompt}]}]}
 
             for model_name in candidate_models:
