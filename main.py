@@ -213,7 +213,6 @@ def ask_ai_stream(request: AskQuery):
         else:
             context = "\n\n".join([f"Source: {chunk['title']}\n{chunk['content']}" for chunk in matched_chunks])
 
-        # Exclude previous fallback turns from conversation memory
         valid_turns = [
             turn for turn in (request.history or [])
             if "I don't find that information" not in turn.content
@@ -244,12 +243,12 @@ Answer:"""
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"__SOURCES__{sources_payload}__ENDSOURCES__\n"
 
-            # Validated production endpoints with modern x-goog-api-key authorization
+            # Use active generation models with x-goog-api-key
             model_targets = [
-                ("v1beta", "gemini-1.5-flash"),
-                ("v1beta", "gemini-1.5-flash-latest"),
                 ("v1beta", "gemini-2.5-flash"),
-                ("v1", "gemini-1.5-flash"),
+                ("v1beta", "gemini-2.5-flash-lite"),
+                ("v1beta", "gemini-2.0-flash-exp"),
+                ("v1", "gemini-2.5-flash")
             ]
             body = {"contents": [{"parts": [{"text": prompt}]}]}
             headers = {
