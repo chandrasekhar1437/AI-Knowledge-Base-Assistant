@@ -1,7 +1,6 @@
 import io
 import json
 import os
-import time
 from typing import List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -30,57 +29,31 @@ gemini_api_key = os.getenv("GEMINI_API_KEY")
 if not gemini_api_key:
     raise ValueError("GEMINI_API_KEY is not configured in environment variables.")
 
-hf_token = os.getenv("HF_TOKEN")
-if not hf_token:
-    raise ValueError("HF_TOKEN is not configured in environment variables.")
-
 gemini_client = genai.Client(api_key=gemini_api_key)
 
-HF_FEATURE_EXTRACTION_URL = (
-    "https://router.huggingface.co/hf-inference/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
-)
-HF_FALLBACK_URL = (
-    "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2"
-)
-
-HF_HEADERS = {
-    "Authorization": f"Bearer {hf_token}",
-    "Content-Type": "application/json",
-    "x-use-cache": "false"
-}
-
+# Direct v1 embedding call (768 dimensions, universally enabled across all Google AI Studio keys)
 def get_embedding(text: str) -> List[float]:
-    clean_text = text.replace("\r", " ").strip()
+    url = f"https://generativelanguage.googleapis.com/v1/models/embedding-001:embedContent?key={gemini_api_key}"
     payload = {
-        "inputs": clean_text,
-        "parameters": {"pooling": "mean", "normalize": True},
-        "options": {"wait_for_model": True}
+        "content": {
+            "parts": [{"text": text}]
+        }
     }
+    
+    resp = requests.post(url, json=payload, timeout=30)
+    
+    if resp.status_code == 200:
+        data = resp.json()
+        return data["embedding"]["values"]
+        
+    # Fallback to v1beta text-embedding-004 if available
+    fallback_url = f"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={gemini_api_key}"
+    fb_resp = requests.post(fallback_url, json=payload, timeout=30)
+    if fb_resp.status_code == 200:
+        data = fb_resp.json()
+        return data["embedding"]["values"]
 
-    urls_to_try = [HF_FEATURE_EXTRACTION_URL, HF_FALLBACK_URL]
-
-    for target_url in urls_to_try:
-        for _ in range(3):
-            try:
-                res = requests.post(target_url, headers=HF_HEADERS, json=payload, timeout=40)
-                if res.status_code == 200:
-                    data = res.json()
-                    if isinstance(data, list) and len(data) > 0:
-                        if isinstance(data[0], list):
-                            return data[0]
-                        if isinstance(data[0], (float, int)):
-                            return data
-                elif res.status_code == 503:
-                    time.sleep(3)
-                    continue
-            except requests.RequestException:
-                time.sleep(2)
-                continue
-
-    raise HTTPException(
-        status_code=500,
-        detail="HuggingFace serverless feature extraction failed across endpoints."
-    )
+    raise HTTPException(status_code=500, detail=f"Embedding API error: {resp.text}")
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1500,
