@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from google import genai
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel
 from pypdf import PdfReader
@@ -34,9 +33,7 @@ hf_token = os.getenv("HF_TOKEN")
 if not hf_token:
     raise ValueError("HF_TOKEN is not set in environment variables.")
 
-gemini_client = genai.Client(api_key=gemini_api_key)
-
-# Native Feature Extraction endpoint (384 dimensions)
+# Hugging Face Feature Extraction (384 dimensions)
 HF_EMBED_URL = "https://router.huggingface.co/hf-inference/models/BAAI/bge-small-en-v1.5"
 
 def get_embedding(text: str) -> List[float]:
@@ -50,7 +47,7 @@ def get_embedding(text: str) -> List[float]:
     payload = {"inputs": clean_text}
 
     last_err = ""
-    for attempt in range(5):
+    for _ in range(5):
         try:
             res = requests.post(HF_EMBED_URL, headers=headers, json=payload, timeout=60)
             if res.status_code == 200:
@@ -61,7 +58,7 @@ def get_embedding(text: str) -> List[float]:
                     if isinstance(data[0], (float, int)):
                         return data
             elif res.status_code in (503, 504):
-                time.sleep(5)
+                time.sleep(4)
                 continue
             else:
                 last_err = res.text
@@ -174,6 +171,28 @@ def search_knowledge(search: SearchQuery):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+def call_gemini_generate(prompt: str) -> str:
+    # Try active Gemini models in sequence
+    models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"]
+    
+    for model_name in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_api_key}"
+        body = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }]
+        }
+        res = requests.post(url, json=body, timeout=40)
+        if res.status_code == 200:
+            data = res.json()
+            candidates = data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                if parts:
+                    return parts[0].get("text", "")
+    
+    raise RuntimeError(f"All Gemini models returned non-200. Last response: {res.text}")
+
 @app.post("/ask-stream")
 def ask_ai_stream(request: AskQuery):
     try:
@@ -215,13 +234,9 @@ Answer:"""
             yield f"{sources_payload}\n"
 
             try:
-                stream = gemini_client.models.generate_content_stream(
-                    model="gemini-1.5-flash",
-                    contents=prompt,
-                )
-                for chunk in stream:
-                    if chunk.text:
-                        yield chunk.text
+                # Direct REST call with model fallback
+                answer_text = call_gemini_generate(prompt)
+                yield answer_text
             except Exception as stream_err:
                 yield f"\n\n[Generation error: {str(stream_err)}]"
 
