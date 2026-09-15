@@ -198,25 +198,27 @@ def ask_ai_stream(request: AskQuery):
             recent_turns = request.history[-6:]
             formatted_history = "\n".join([f"{turn.role.capitalize()}: {turn.content}" for turn in recent_turns])
 
-        prompt = f"""You are a helpful, professional AI assistant answering questions based on the provided documents.
+        prompt = f"""You are an intelligent document and knowledge base assistant. Answer the user's question clearly, thoroughly, and factually using the relevant document context and chat history below.
 
-CRITICAL OUTPUT GUIDELINES:
+CRITICAL FORMATTING INSTRUCTIONS:
 - Provide ONLY the direct, final response for the user.
-- Do NOT output your thought process, meta-analysis, steps, or planning scratchpads.
-- Respond with clean Markdown (bullet points, bold key terms, concise paragraphs).
-- Retain exact technical stacks, project names, metrics, links, and dates accurately.
+- Do NOT output your thought process, meta-analysis, steps, or planning notes.
+- Use clear structural scaffolding: use bold standalone categories, clean spaced paragraphs, and separate bullet points.
+- Never compress everything into a single unreadable inline sentence or single wrapped bullet point.
+- Preserve exact technical stacks, project names, schema fields, metrics, links, and dates accurately.
 - If the question cannot be answered using the provided context, state clearly: "I don't find that information in the uploaded documents."
 
-Document Context:
+Relevant Document Context:
 {context}
 
-Conversation History:
+Chat History:
 {formatted_history if formatted_history else "No prior conversation."}
 
-User Question: {request.question}
-Final Answer:"""
+Question: {request.question}
+Answer:"""
 
         def token_generator():
+            # Send source metadata as the first line for frontend display
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"{sources_payload}\n"
 
