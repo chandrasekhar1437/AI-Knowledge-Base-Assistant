@@ -69,7 +69,7 @@ def get_embedding(text: str) -> List[float]:
 
     raise HTTPException(status_code=500, detail=f"HF Embedding error: {last_err}")
 
-# Preserves complete rubric tables and phase sections together
+# Keeps full rubric sections and phases together
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=2000,
     chunk_overlap=400,
@@ -201,7 +201,7 @@ def ask_ai_stream(request: AskQuery):
     try:
         query_vector = get_embedding(request.question)
 
-        # Retrieve up to 20 chunks to include all 14 chunks of the document
+        # Retrieve 20 chunks to encompass all 14 ingested document chunks
         matched_chunks = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
             "match_threshold": 0.0,
@@ -213,6 +213,7 @@ def ask_ai_stream(request: AskQuery):
         else:
             context = "\n\n".join([f"Source: {chunk['title']}\n{chunk['content']}" for chunk in matched_chunks])
 
+        # Exclude fallback strings from conversational memory
         valid_turns = [
             turn for turn in (request.history or [])
             if "I don't find that information" not in turn.content
@@ -228,6 +229,7 @@ STRICT FORMATTING REQUIREMENTS:
 - Structure lists with each item on its own separate line using bullet syntax:
   * **Title**: Description here.
   * **Next Title**: Description here.
+- Never write continuous inline lists or glue headers into bullet text.
 - If the answer is not present in the Document Context, reply exactly: "I don't find that information in the uploaded documents."
 
 Document Context:
@@ -243,21 +245,23 @@ Answer:"""
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"__SOURCES__{sources_payload}__ENDSOURCES__\n"
 
-            # Use active generation models with x-goog-api-key
+            # Includes the 3.0-flash endpoint requested by your API return error
             model_targets = [
+                ("v1beta", "gemini-3.0-flash"),
                 ("v1beta", "gemini-2.5-flash"),
-                ("v1beta", "gemini-2.5-flash-lite"),
-                ("v1beta", "gemini-2.0-flash-exp"),
+                ("v1beta", "gemini-1.5-flash"),
+                ("v1", "gemini-1.5-flash"),
                 ("v1", "gemini-2.5-flash")
             ]
             body = {"contents": [{"parts": [{"text": prompt}]}]}
+            api_key = gemini_api_key.strip()
             headers = {
                 "Content-Type": "application/json",
-                "x-goog-api-key": gemini_api_key.strip()
+                "x-goog-api-key": api_key
             }
 
             for api_version, model_name in model_targets:
-                url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model_name}:streamGenerateContent?alt=sse"
+                url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model_name}:streamGenerateContent?alt=sse&key={api_key}"
                 try:
                     with requests.post(url, headers=headers, json=body, stream=True, timeout=(10, 60)) as resp:
                         if resp.status_code == 200:
