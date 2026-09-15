@@ -69,6 +69,7 @@ def get_embedding(text: str) -> List[float]:
 
     raise HTTPException(status_code=500, detail=f"HF Embedding error: {last_err}")
 
+# Preserves complete rubric tables and phase sections together
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=2000,
     chunk_overlap=400,
@@ -220,7 +221,7 @@ def ask_ai_stream(request: AskQuery):
     try:
         query_vector = get_embedding(request.question)
 
-        # Retrieve 20 chunks to ensure complete document context
+        # Retrieve up to 20 chunks to encompass complete document context
         matched_chunks = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
             "match_threshold": 0.0,
@@ -232,6 +233,7 @@ def ask_ai_stream(request: AskQuery):
         else:
             context = "\n\n".join([f"Source: {chunk['title']}\n{chunk['content']}" for chunk in matched_chunks])
 
+        # Exclude fallback strings from conversational memory
         valid_turns = [
             turn for turn in (request.history or [])
             if "I don't find that information" not in turn.content
@@ -239,34 +241,37 @@ def ask_ai_stream(request: AskQuery):
         recent_turns = valid_turns[-4:]
         formatted_history = "\n".join([f"{turn.role.capitalize()}: {turn.content}" for turn in recent_turns]) if recent_turns else "None."
 
-        prompt = f"""You are a professional documentation assistant. Answer the user's question clearly, thoroughly, and accurately using ONLY the provided Document Context.
-
-STRICT FORMATTING REQUIREMENTS:
-- Provide ONLY the direct answer. No intro meta-talk or planning.
-- Use clean Markdown with double blank lines between paragraphs, headers, and bullet points.
-- Structure lists with each item on its own separate line using bullet syntax:
-  * **Title**: Description here.
-  * **Next Title**: Description here.
-- If the answer is not present in the Document Context, reply exactly: "I don't find that information in the uploaded documents."
-
-Document Context:
+        user_content = f"""Document Context:
 {context}
 
 Prior Conversation:
 {formatted_history}
 
-Question: {request.question}
-Answer:"""
+Question: {request.question}"""
+
+        system_instruction = (
+            "You are a professional documentation assistant. Answer the user's question clearly and accurately using ONLY the provided Document Context. "
+            "Output ONLY the final answer formatted in clean Markdown bullets. Do not output instructions, constraints, or thinking steps. "
+            "If the answer is not present in the Document Context, reply exactly: 'I don't find that information in the uploaded documents.'"
+        )
 
         def token_generator():
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"__SOURCES__{sources_payload}__ENDSOURCES__\n"
 
             api_key = gemini_api_key.strip()
-            # Fetch valid models for this exact key directly from Google
             active_models = fetch_active_models(api_key)
 
-            body = {"contents": [{"parts": [{"text": prompt}]}]}
+            body = {
+                "system_instruction": {
+                    "parts": [{"text": system_instruction}]
+                },
+                "contents": [{"parts": [{"text": user_content}]}],
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "maxOutputTokens": 1024
+                }
+            }
             headers = {
                 "Content-Type": "application/json",
                 "x-goog-api-key": api_key
