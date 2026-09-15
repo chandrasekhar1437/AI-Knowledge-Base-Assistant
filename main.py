@@ -69,7 +69,7 @@ def get_embedding(text: str) -> List[float]:
 
     raise HTTPException(status_code=500, detail=f"HF Embedding error: {last_err}")
 
-# Chunk size preserves complete rubric tables and phase sections together
+# Preserves complete rubric tables and phase sections together
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=2000,
     chunk_overlap=400,
@@ -129,7 +129,7 @@ async def upload_document(file: UploadFile = File(...)):
             docx_bytes = await file.read()
             doc = docx.Document(io.BytesIO(docx_bytes))
 
-            # Preserve natural sequential reading order for paragraphs and tables
+            # Preserve sequential document order for paragraphs and tables
             for element in doc.element.body:
                 if element.tag.endswith("p"):
                     p_text = "".join(node.text for node in element.iter() if node.text and node.tag.endswith("t")).strip()
@@ -142,7 +142,7 @@ async def upload_document(file: UploadFile = File(...)):
                             cell_text = "".join(node.text for node in cell.iter() if node.text and node.tag.endswith("t")).strip().replace("\n", " ")
                             if cell_text:
                                 cells.append(cell_text)
-                        
+
                         seen = []
                         for c in cells:
                             if not seen or c != seen[-1]:
@@ -243,7 +243,7 @@ Answer:"""
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"__SOURCES__{sources_payload}__ENDSOURCES__\n"
 
-            candidate_models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-pro"]
+            candidate_models = ["gemini-1.5-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
             body = {"contents": [{"parts": [{"text": prompt}]}]}
 
             for model_name in candidate_models:
@@ -265,7 +265,10 @@ Answer:"""
                                         except Exception:
                                             continue
                             return
-                except Exception:
+                        else:
+                            print(f"Gemini API returned status {resp.status_code} for {model_name}: {resp.text}")
+                except Exception as exc:
+                    print(f"Connection exception with {model_name}: {exc}")
                     continue
 
             yield "I don't find that information in the uploaded documents."
