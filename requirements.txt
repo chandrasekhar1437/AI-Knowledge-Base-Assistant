@@ -8,3 +8,4 @@ python-dotenv
 pydantic
 requests
 streamlit
+python-docx
