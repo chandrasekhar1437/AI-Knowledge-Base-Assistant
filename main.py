@@ -69,7 +69,6 @@ def get_embedding(text: str) -> List[float]:
 
     raise HTTPException(status_code=500, detail=f"HF Embedding error: {last_err}")
 
-# Preserves complete rubric tables and phase sections together
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=2000,
     chunk_overlap=400,
@@ -92,9 +91,30 @@ class AskQuery(BaseModel):
     question: str
     history: Optional[List[ChatTurn]] = []
 
+def fetch_active_models(api_key: str) -> List[str]:
+    """Queries Google to get the exact models enabled for this specific key."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            items = r.json().get("models", [])
+            valid = [
+                m["name"].replace("models/", "")
+                for m in items
+                if "generateContent" in m.get("supportedGenerationMethods", [])
+            ]
+            print(f"Dynamically discovered models for key: {valid}")
+            return valid
+        else:
+            print(f"ListModels call returned status {r.status_code}: {r.text}")
+    except Exception as err:
+        print(f"ListModels call failed: {err}")
+    return ["gemini-1.5-flash", "gemini-1.5-pro"]
+
 @app.get("/")
 def home():
-    return {"message": "AI Knowledge Base Assistant API is active."}
+    models = fetch_active_models(gemini_api_key.strip())
+    return {"message": "AI Knowledge Base Assistant API is active.", "active_models": models}
 
 @app.post("/add-knowledge")
 def add_knowledge(item: KnowledgeItem):
@@ -129,7 +149,6 @@ async def upload_document(file: UploadFile = File(...)):
             docx_bytes = await file.read()
             doc = docx.Document(io.BytesIO(docx_bytes))
 
-            # Preserve sequential document order for paragraphs and tables
             for element in doc.element.body:
                 if element.tag.endswith("p"):
                     p_text = "".join(node.text for node in element.iter() if node.text and node.tag.endswith("t")).strip()
@@ -201,7 +220,7 @@ def ask_ai_stream(request: AskQuery):
     try:
         query_vector = get_embedding(request.question)
 
-        # Retrieve up to 20 chunks to encompass all 14 document chunks
+        # Retrieve 20 chunks to ensure complete document context
         matched_chunks = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
             "match_threshold": 0.0,
@@ -213,7 +232,6 @@ def ask_ai_stream(request: AskQuery):
         else:
             context = "\n\n".join([f"Source: {chunk['title']}\n{chunk['content']}" for chunk in matched_chunks])
 
-        # Exclude fallback strings from conversational memory
         valid_turns = [
             turn for turn in (request.history or [])
             if "I don't find that information" not in turn.content
@@ -241,39 +259,23 @@ Question: {request.question}
 Answer:"""
 
         def token_generator():
-            # Send sources payload immediately so Streamlit UI activates and avoids read timeouts
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"__SOURCES__{sources_payload}__ENDSOURCES__\n"
 
-            # Check if retrieved chunks are from a PDF
-            is_pdf = any(".pdf" in chunk.get("title", "").lower() for chunk in (matched_chunks or []))
-
-            # Route models dynamically based on file type
-            if is_pdf:
-                model_targets = [
-                    ("v1beta", "gemini-2.5-flash"),
-                    ("v1beta", "gemini-2.0-flash"),
-                    ("v1beta", "gemini-2.5-flash-lite")
-                ]
-            else:
-                model_targets = [
-                    ("v1beta", "gemini-3.0-flash"),
-                    ("v1beta", "gemini-2.5-flash"),
-                    ("v1beta", "gemini-2.0-flash"),
-                    ("v1beta", "gemini-2.5-flash-lite")
-                ]
+            api_key = gemini_api_key.strip()
+            # Fetch valid models for this exact key directly from Google
+            active_models = fetch_active_models(api_key)
 
             body = {"contents": [{"parts": [{"text": prompt}]}]}
-            api_key = gemini_api_key.strip()
             headers = {
                 "Content-Type": "application/json",
                 "x-goog-api-key": api_key
             }
 
-            for api_version, model_name in model_targets:
-                url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model_name}:streamGenerateContent?alt=sse&key={api_key}"
+            for model_name in active_models:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:streamGenerateContent?alt=sse&key={api_key}"
                 try:
-                    with requests.post(url, headers=headers, json=body, stream=True, timeout=(6, 45)) as resp:
+                    with requests.post(url, headers=headers, json=body, stream=True, timeout=(8, 45)) as resp:
                         if resp.status_code == 200:
                             for line in resp.iter_lines():
                                 if line:
@@ -290,9 +292,9 @@ Answer:"""
                                             continue
                             return
                         else:
-                            print(f"Model {model_name} on {api_version} returned {resp.status_code}: {resp.text[:120]}")
+                            print(f"Model {model_name} returned status {resp.status_code}: {resp.text[:120]}")
                 except Exception as exc:
-                    print(f"Connection exception with {model_name} on {api_version}: {exc}")
+                    print(f"Connection error with {model_name}: {exc}")
                     continue
 
             yield "I don't find that information in the uploaded documents."
