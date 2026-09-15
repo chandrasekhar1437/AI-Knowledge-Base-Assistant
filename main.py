@@ -86,7 +86,7 @@ class KnowledgeItem(BaseModel):
 
 class SearchQuery(BaseModel):
     query: str
-    limit: int = 15
+    limit: int = 20
 
 class AskQuery(BaseModel):
     question: str
@@ -201,10 +201,11 @@ def ask_ai_stream(request: AskQuery):
     try:
         query_vector = get_embedding(request.question)
 
+        # Retrieve up to 20 chunks to ensure the entire ingested document is included
         matched_chunks = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
             "match_threshold": 0.0,
-            "match_count": 15
+            "match_count": 20
         }).execute().data
 
         if not matched_chunks:
@@ -212,6 +213,7 @@ def ask_ai_stream(request: AskQuery):
         else:
             context = "\n\n".join([f"Source: {chunk['title']}\n{chunk['content']}" for chunk in matched_chunks])
 
+        # Filter out prior fallback loops so they do not bias LLM generation
         valid_turns = [
             turn for turn in (request.history or [])
             if "I don't find that information" not in turn.content
@@ -243,7 +245,7 @@ Answer:"""
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"__SOURCES__{sources_payload}__ENDSOURCES__\n"
 
-            # Updated to active available endpoints to resolve 404 errors
+            # Uses active endpoints with 1.5-flash leading
             candidate_models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
             body = {"contents": [{"parts": [{"text": prompt}]}]}
 
