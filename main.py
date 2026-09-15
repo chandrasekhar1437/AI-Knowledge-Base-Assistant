@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import time
 from typing import List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -29,31 +30,35 @@ gemini_api_key = os.getenv("GEMINI_API_KEY")
 if not gemini_api_key:
     raise ValueError("GEMINI_API_KEY is not set in environment variables")
 
+hf_token = os.getenv("HF_TOKEN")
+if not hf_token:
+    raise ValueError("HF_TOKEN is not set in environment variables")
+
 gemini_client = genai.Client(api_key=gemini_api_key)
 
-# Direct REST call to Gemini text-embedding-004 (Zero RAM overhead)
-def get_embedding(text: str) -> List[float]:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={gemini_api_key}"
-    payload = {
-        "content": {
-            "parts": [{"text": text}]
-        }
-    }
-    
-    response = requests.post(url, json=payload, timeout=30)
-    
-    if response.status_code == 200:
-        data = response.json()
-        return data["embedding"]["values"]
-    
-    # Fallback to embedding-001 if model availability differs by project
-    fallback_url = f"https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent?key={gemini_api_key}"
-    fb_response = requests.post(fallback_url, json=payload, timeout=30)
-    if fb_response.status_code == 200:
-        data = fb_response.json()
-        return data["embedding"]["values"]
+HF_API_URL = "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2"
+HF_HEADERS = {"Authorization": f"Bearer {hf_token}"}
 
-    raise HTTPException(status_code=500, detail=f"Gemini Embedding Error: {response.text}")
+# Free, fast serverless cloud embeddings (384 dimensions)
+def get_embedding(text: str) -> List[float]:
+    payload = {"inputs": text, "options": {"wait_for_model": True}}
+    
+    for attempt in range(3):
+        res = requests.post(HF_API_URL, headers=HF_HEADERS, json=payload, timeout=45)
+        if res.status_code == 200:
+            data = res.json()
+            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+                return data[0]
+            if isinstance(data, list) and isinstance(data[0], (float, int)):
+                return data
+        elif res.status_code == 503:
+            # Model is loading on HF cold start, wait briefly
+            time.sleep(4)
+            continue
+        else:
+            raise HTTPException(status_code=500, detail=f"HuggingFace embedding error: {res.text}")
+            
+    raise HTTPException(status_code=500, detail="HuggingFace model warmup timed out. Please try again.")
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1800,
