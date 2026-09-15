@@ -171,64 +171,6 @@ def search_knowledge(search: SearchQuery):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-def call_gemini_generate(prompt: str) -> str:
-    # 1. Discover models supported by your API key
-    list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_api_key}"
-    discovered_models = []
-    
-    try:
-        r = requests.get(list_url, timeout=15)
-        if r.status_code == 200:
-            data = r.json()
-            for m in data.get("models", []):
-                methods = m.get("supportedGenerationMethods", [])
-                if "generateContent" in methods:
-                    name = m.get("name", "")
-                    if name.startswith("models/"):
-                        name = name[len("models/"):]
-                    discovered_models.append(name)
-    except Exception:
-        pass
-
-    # Sort priority: newer flash models first
-    def model_priority(name: str):
-        if "flash" in name.lower():
-            return 0
-        if "pro" in name.lower():
-            return 1
-        return 2
-
-    discovered_models.sort(key=model_priority)
-
-    # Fallback list if discovery returned empty
-    candidate_models = discovered_models or [
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-pro"
-    ]
-
-    last_error = ""
-    for model_name in candidate_models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_api_key}"
-        body = {
-            "contents": [{
-                "parts": [{"text": prompt}]
-            }]
-        }
-        res = requests.post(url, json=body, timeout=40)
-        if res.status_code == 200:
-            result_json = res.json()
-            candidates = result_json.get("candidates", [])
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                if parts:
-                    return parts[0].get("text", "")
-        else:
-            last_error = f"{model_name}: {res.text}"
-
-    raise RuntimeError(f"Could not generate answer. Last error: {last_error}")
-
 @app.post("/ask-stream")
 def ask_ai_stream(request: AskQuery):
     try:
@@ -265,14 +207,64 @@ Question: {request.question}
 Answer:"""
 
         def token_generator():
+            # First line: metadata JSON for frontend source citations
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"{sources_payload}\n"
 
+            # Discover models or fallback to primary candidates
+            candidate_models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-pro"]
             try:
-                answer_text = call_gemini_generate(prompt)
-                yield answer_text
-            except Exception as stream_err:
-                yield f"\n\n[Generation error: {str(stream_err)}]"
+                list_res = requests.get(
+                    f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_api_key}",
+                    timeout=10
+                )
+                if list_res.status_code == 200:
+                    found = [
+                        m["name"].replace("models/", "")
+                        for m in list_res.json().get("models", [])
+                        if "generateContent" in m.get("supportedGenerationMethods", [])
+                    ]
+                    if found:
+                        candidate_models = found
+            except Exception:
+                pass
+
+            body = {
+                "contents": [{"parts": [{"text": prompt}]}]
+            }
+
+            streamed_successfully = False
+            last_err = ""
+
+            for model_name in candidate_models:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:streamGenerateContent?alt=sse&key={gemini_api_key}"
+                try:
+                    with requests.post(url, json=body, stream=True, timeout=(10, 60)) as resp:
+                        if resp.status_code == 200:
+                            for line in resp.iter_lines():
+                                if line:
+                                    decoded = line.decode("utf-8")
+                                    if decoded.startswith("data: "):
+                                        try:
+                                            chunk_data = json.loads(decoded[6:])
+                                            parts = chunk_data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                                            for p in parts:
+                                                txt = p.get("text", "")
+                                                if txt:
+                                                    streamed_successfully = True
+                                                    yield txt
+                                        except Exception:
+                                            continue
+                            if streamed_successfully:
+                                return
+                        else:
+                            last_err = f"{model_name}: {resp.text}"
+                except Exception as e:
+                    last_err = str(e)
+                    continue
+
+            if not streamed_successfully:
+                yield f"\n\n[Generation error: {last_err}]"
 
         return StreamingResponse(token_generator(), media_type="text/plain")
 
