@@ -172,10 +172,44 @@ def search_knowledge(search: SearchQuery):
         raise HTTPException(status_code=400, detail=str(exc))
 
 def call_gemini_generate(prompt: str) -> str:
-    # Try active Gemini models in sequence
-    models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"]
+    # 1. Discover models supported by your API key
+    list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_api_key}"
+    discovered_models = []
     
-    for model_name in models:
+    try:
+        r = requests.get(list_url, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            for m in data.get("models", []):
+                methods = m.get("supportedGenerationMethods", [])
+                if "generateContent" in methods:
+                    name = m.get("name", "")
+                    if name.startswith("models/"):
+                        name = name[len("models/"):]
+                    discovered_models.append(name)
+    except Exception:
+        pass
+
+    # Sort priority: newer flash models first
+    def model_priority(name: str):
+        if "flash" in name.lower():
+            return 0
+        if "pro" in name.lower():
+            return 1
+        return 2
+
+    discovered_models.sort(key=model_priority)
+
+    # Fallback list if discovery returned empty
+    candidate_models = discovered_models or [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-pro"
+    ]
+
+    last_error = ""
+    for model_name in candidate_models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_api_key}"
         body = {
             "contents": [{
@@ -184,14 +218,16 @@ def call_gemini_generate(prompt: str) -> str:
         }
         res = requests.post(url, json=body, timeout=40)
         if res.status_code == 200:
-            data = res.json()
-            candidates = data.get("candidates", [])
+            result_json = res.json()
+            candidates = result_json.get("candidates", [])
             if candidates:
                 parts = candidates[0].get("content", {}).get("parts", [])
                 if parts:
                     return parts[0].get("text", "")
-    
-    raise RuntimeError(f"All Gemini models returned non-200. Last response: {res.text}")
+        else:
+            last_error = f"{model_name}: {res.text}"
+
+    raise RuntimeError(f"Could not generate answer. Last error: {last_error}")
 
 @app.post("/ask-stream")
 def ask_ai_stream(request: AskQuery):
@@ -229,12 +265,10 @@ Question: {request.question}
 Answer:"""
 
         def token_generator():
-            # First line: metadata JSON for frontend source citations
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"{sources_payload}\n"
 
             try:
-                # Direct REST call with model fallback
                 answer_text = call_gemini_generate(prompt)
                 yield answer_text
             except Exception as stream_err:
