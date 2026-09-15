@@ -192,26 +192,30 @@ def ask_ai_stream(request: AskQuery):
             recent_turns = request.history[-6:]
             formatted_history = "\n".join([f"{turn.role.capitalize()}: {turn.content}" for turn in recent_turns])
 
-        prompt = f"""You are an intelligent document and knowledge base assistant.
-Answer the user's question clearly, thoroughly, and factually using the relevant document context and chat history below.
-Preserve exact dates, skills, links, tools, and technical specifications.
-If the answer is completely absent from the context and chat history, state clearly what you can and cannot find.
+        prompt = f"""You are a helpful, professional AI assistant answering questions based on the provided documents.
 
-Relevant Document Context:
+CRITICAL OUTPUT GUIDELINES:
+- Provide ONLY the direct, final response for the user.
+- Do NOT output your thought process, meta-analysis, steps, or planning scratchpads.
+- Respond with clean Markdown (bullet points, bold key terms, concise paragraphs).
+- Retain exact technical stacks, project names, metrics, links, and dates accurately.
+- If the question cannot be answered using the provided context, state clearly: "I don't find that information in the uploaded documents."
+
+Document Context:
 {context}
 
-Chat History:
+Conversation History:
 {formatted_history if formatted_history else "No prior conversation."}
 
-Question: {request.question}
-Answer:"""
+User Question: {request.question}
+Final Answer:"""
 
         def token_generator():
-            # First line: metadata JSON for frontend source citations
+            # Metadata JSON line consumed by Streamlit for source citations
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"{sources_payload}\n"
 
-            # Discover models or fallback to primary candidates
+            # Dynamic model discovery prioritizing Flash variants
             candidate_models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-pro"]
             try:
                 list_res = requests.get(
@@ -225,7 +229,7 @@ Answer:"""
                         if "generateContent" in m.get("supportedGenerationMethods", [])
                     ]
                     if found:
-                        candidate_models = found
+                        candidate_models = sorted(found, key=lambda x: 0 if "flash" in x.lower() else 1)
             except Exception:
                 pass
 
@@ -259,8 +263,8 @@ Answer:"""
                                 return
                         else:
                             last_err = f"{model_name}: {resp.text}"
-                except Exception as e:
-                    last_err = str(e)
+                except Exception as exc:
+                    last_err = str(exc)
                     continue
 
             if not streamed_successfully:
