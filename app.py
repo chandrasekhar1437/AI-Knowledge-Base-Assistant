@@ -45,7 +45,7 @@ if "messages" not in st.session_state:
 # --- SIDEBAR: Ingestion & Controls ---
 with st.sidebar:
     st.title("📄 Ingestion Hub")
-    
+
     # 1. Document Uploader (supports PDF, DOCX, TXT)
     st.subheader("Upload Document")
     uploaded_file = st.file_uploader(
@@ -53,14 +53,14 @@ with st.sidebar:
         type=["pdf", "docx", "txt"],
         help="Embeds your document directly into the vector database."
     )
-    
+
     if st.button("Process & Ingest", use_container_width=True):
         if uploaded_file is not None:
             with st.spinner("Chunking, embedding, and storing in Supabase..."):
                 try:
                     files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
                     response = requests.post(f"{API_URL}/upload-document", files=files, timeout=90)
-                    
+
                     if response.status_code == 200:
                         data = response.json()
                         chunks = data.get("chunks_created", 0)
@@ -97,7 +97,7 @@ with st.sidebar:
                 st.warning("Both Title and Content are required.")
 
     st.markdown("---")
-    
+
     # 3. Chat Control
     if st.button("Clear Chat History", use_container_width=True):
         st.session_state.messages = []
@@ -122,18 +122,15 @@ for msg in st.session_state.messages:
 
 # Input for new user question
 if prompt := st.chat_input("Ask a question about your knowledge base..."):
-    # Append & display user prompt
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Prepare chat history for context
     history_payload = [
         {"role": m["role"], "content": m["content"]}
         for m in st.session_state.messages[:-1]
     ]
 
-    # Generate streaming assistant response
     with st.chat_message("assistant"):
         response_placeholder = st.empty()
         full_response = ""
@@ -147,29 +144,37 @@ if prompt := st.chat_input("Ask a question about your knowledge base..."):
 
             with requests.post(f"{API_URL}/ask-stream", json=req_body, stream=True, timeout=60) as resp:
                 if resp.status_code == 200:
-                    first_line = True
-                    for chunk in resp.iter_lines():
-                        if chunk:
-                            line_text = chunk.decode("utf-8")
-                            
-                            # First line contains the sources JSON
-                            if first_line:
-                                first_line = False
-                                try:
-                                    meta = json.loads(line_text)
-                                    retrieved_sources = meta.get("sources", [])
-                                    continue
-                                except Exception:
-                                    # Fallback if first line isn't metadata
-                                    full_response += line_text
+                    stream_buffer = ""
+                    sources_extracted = False
+
+                    for raw_chunk in resp.iter_content(chunk_size=None, decode_unicode=True):
+                        if raw_chunk:
+                            stream_buffer += raw_chunk
+
+                            # Extract metadata header wrapped in delimiter tokens
+                            if not sources_extracted and "__SOURCES__" in stream_buffer:
+                                if "__ENDSOURCES__\n" in stream_buffer:
+                                    parts = stream_buffer.split("__ENDSOURCES__\n", 1)
+                                    meta_str = parts[0].replace("__SOURCES__", "")
+                                    try:
+                                        meta = json.loads(meta_str)
+                                        retrieved_sources = meta.get("sources", [])
+                                    except Exception:
+                                        pass
+                                    full_response = parts[1]
+                                    sources_extracted = True
                                     response_placeholder.markdown(full_response + "▌")
-                                    continue
-                            
-                            full_response += line_text
-                            response_placeholder.markdown(full_response + "▌")
+                                continue
+
+                            if sources_extracted:
+                                full_response += raw_chunk
+                                response_placeholder.markdown(full_response + "▌")
+                            else:
+                                full_response = stream_buffer
+                                response_placeholder.markdown(full_response + "▌")
 
                     response_placeholder.markdown(full_response)
-                    
+
                     if retrieved_sources:
                         with st.expander("View Retrieved Sources"):
                             for idx, src in enumerate(retrieved_sources):
@@ -179,7 +184,6 @@ if prompt := st.chat_input("Ask a question about your knowledge base..."):
                                 if idx < len(retrieved_sources) - 1:
                                     st.divider()
 
-                    # Save complete response to state
                     st.session_state.messages.append({
                         "role": "assistant",
                         "content": full_response,

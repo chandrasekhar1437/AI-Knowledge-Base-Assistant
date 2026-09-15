@@ -70,8 +70,8 @@ def get_embedding(text: str) -> List[float]:
     raise HTTPException(status_code=500, detail=f"HF Embedding error: {last_err}")
 
 text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1500,
-    chunk_overlap=250,
+    chunk_size=1200,
+    chunk_overlap=200,
     separators=["\n\n", "\n", ". ", " ", ""]
 )
 
@@ -123,17 +123,15 @@ async def upload_document(file: UploadFile = File(...)):
             for page in reader.pages:
                 extracted = page.extract_text()
                 if extracted:
-                    content_text += extracted + "\n"
+                    content_text += extracted + "\n\n"
         elif filename.endswith(".docx"):
             docx_bytes = await file.read()
             doc = docx.Document(io.BytesIO(docx_bytes))
             
-            # Extract standard paragraphs
             for p in doc.paragraphs:
                 if p.text.strip():
-                    content_text += p.text.strip() + "\n"
+                    content_text += p.text.strip() + "\n\n"
             
-            # Extract tables, rubrics, and criteria grids
             for table in doc.tables:
                 for row in table.rows:
                     seen_cells = []
@@ -142,7 +140,7 @@ async def upload_document(file: UploadFile = File(...)):
                         if txt and (not seen_cells or txt != seen_cells[-1]):
                             seen_cells.append(txt)
                     if seen_cells:
-                        content_text += " | ".join(seen_cells) + "\n"
+                        content_text += " | ".join(seen_cells) + "\n\n"
         elif filename.endswith(".txt"):
             content_bytes = await file.read()
             content_text = content_bytes.decode("utf-8")
@@ -175,21 +173,6 @@ async def upload_document(file: UploadFile = File(...)):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-@app.post("/search")
-def search_knowledge(search: SearchQuery):
-    try:
-        query_vector = get_embedding(search.query)
-
-        response = supabase.rpc("match_knowledge", {
-            "query_embedding": query_vector,
-            "match_threshold": 0.10,
-            "match_count": search.limit
-        }).execute()
-
-        return {"query": search.query, "results": response.data}
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
 @app.post("/ask-stream")
 def ask_ai_stream(request: AskQuery):
     try:
@@ -197,8 +180,8 @@ def ask_ai_stream(request: AskQuery):
 
         matched_chunks = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
-            "match_threshold": 0.05,
-            "match_count": 6
+            "match_threshold": 0.01,
+            "match_count": 8
         }).execute().data
 
         if not matched_chunks:
@@ -211,55 +194,33 @@ def ask_ai_stream(request: AskQuery):
             recent_turns = request.history[-6:]
             formatted_history = "\n".join([f"{turn.role.capitalize()}: {turn.content}" for turn in recent_turns])
 
-        prompt = f"""You are an intelligent document and knowledge base assistant. Answer the user's question clearly, thoroughly, and factually using the relevant document context and chat history below.
+        prompt = f"""You are a professional documentation assistant. Answer the user's question clearly and accurately using ONLY the provided Document Context.
 
-CRITICAL FORMATTING INSTRUCTIONS:
-- Provide ONLY the direct, final response for the user.
-- Do NOT output your thought process, meta-analysis, steps, or planning notes.
-- Use clean, spacious Markdown: separate every paragraph, section header, and bullet point with a blank line (double newline `\\n\\n`).
-- Never run headers and bullet items together into a single wrapped block of text.
-- Format lists with proper indentation:
-  * **Heading / Key Concept**: Explanation of details.
-  * **Next Concept**: Explanation of details.
-- Preserve exact technical stacks, project names, schema fields, metrics, links, and dates accurately.
-- If the question cannot be answered using the provided context, state clearly: "I don't find that information in the uploaded documents."
+STRICT FORMATTING REQUIREMENTS:
+- Provide ONLY the direct answer. No intro meta-talk or planning.
+- Use clean Markdown with double blank lines between paragraphs, headers, and bullet points.
+- Structure lists with each item on its own separate line using bullet syntax:
+  * **Title**: Description here.
+  * **Next Title**: Description here.
+- Never write continuous inline lists or glue headers into bullet text.
+- If the answer is not present in the Document Context, reply exactly: "I don't find that information in the uploaded documents."
 
-Relevant Document Context:
+Document Context:
 {context}
 
-Chat History:
-{formatted_history if formatted_history else "No prior conversation."}
+Prior Conversation:
+{formatted_history if formatted_history else "None."}
 
 Question: {request.question}
 Answer:"""
 
         def token_generator():
             sources_payload = json.dumps({"sources": matched_chunks or []})
-            yield f"{sources_payload}\n"
+            # Send source metadata prefixed clearly with SSE data convention
+            yield f"__SOURCES__{sources_payload}__ENDSOURCES__\n"
 
             candidate_models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-pro"]
-            try:
-                list_res = requests.get(
-                    f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_api_key}",
-                    timeout=10
-                )
-                if list_res.status_code == 200:
-                    found = [
-                        m["name"].replace("models/", "")
-                        for m in list_res.json().get("models", [])
-                        if "generateContent" in m.get("supportedGenerationMethods", [])
-                    ]
-                    if found:
-                        candidate_models = sorted(found, key=lambda x: 0 if "flash" in x.lower() else 1)
-            except Exception:
-                pass
-
-            body = {
-                "contents": [{"parts": [{"text": prompt}]}]
-            }
-
-            streamed_successfully = False
-            last_err = ""
+            body = {"contents": [{"parts": [{"text": prompt}]}]}
 
             for model_name in candidate_models:
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:streamGenerateContent?alt=sse&key={gemini_api_key}"
@@ -276,30 +237,16 @@ Answer:"""
                                             for p in parts:
                                                 txt = p.get("text", "")
                                                 if txt:
-                                                    streamed_successfully = True
                                                     yield txt
                                         except Exception:
                                             continue
-                            if streamed_successfully:
-                                return
-                        else:
-                            last_err = f"{model_name}: {resp.text}"
-                except Exception as exc:
-                    last_err = str(exc)
+                            return
+                except Exception:
                     continue
 
-            if not streamed_successfully:
-                yield f"\n\n[Generation error: {last_err}]"
+            yield "I don't find that information in the uploaded documents."
 
         return StreamingResponse(token_generator(), media_type="text/plain")
 
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-@app.get("/knowledge")
-def get_all_knowledge():
-    try:
-        response = supabase.table("knowledge_base").select("id, title, content, created_at").execute()
-        return {"data": response.data}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
