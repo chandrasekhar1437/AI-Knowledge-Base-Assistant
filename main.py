@@ -216,8 +216,11 @@ def ask_ai_stream(request: AskQuery):
 CRITICAL FORMATTING INSTRUCTIONS:
 - Provide ONLY the direct, final response for the user.
 - Do NOT output your thought process, meta-analysis, steps, or planning notes.
-- Use clear structural scaffolding: use bold standalone categories, clean spaced paragraphs, and separate bullet points.
-- Never compress everything into a single unreadable inline sentence or single wrapped bullet point.
+- Use clean, spacious Markdown: separate every paragraph, section header, and bullet point with a blank line (double newline `\\n\\n`).
+- Never run headers and bullet items together into a single wrapped block of text.
+- Format lists with proper indentation:
+  * **Heading / Key Concept**: Explanation of details.
+  * **Next Concept**: Explanation of details.
 - Preserve exact technical stacks, project names, schema fields, metrics, links, and dates accurately.
 - If the question cannot be answered using the provided context, state clearly: "I don't find that information in the uploaded documents."
 
