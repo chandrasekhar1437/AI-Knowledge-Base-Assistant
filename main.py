@@ -69,7 +69,6 @@ def get_embedding(text: str) -> List[float]:
 
     raise HTTPException(status_code=500, detail=f"HF Embedding error: {last_err}")
 
-# Preserves complete rubric tables and phase sections together
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=2000,
     chunk_overlap=400,
@@ -221,7 +220,6 @@ def ask_ai_stream(request: AskQuery):
     try:
         query_vector = get_embedding(request.question)
 
-        # Retrieve up to 20 chunks to encompass complete document context
         matched_chunks = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
             "match_threshold": 0.0,
@@ -233,7 +231,6 @@ def ask_ai_stream(request: AskQuery):
         else:
             context = "\n\n".join([f"Source: {chunk['title']}\n{chunk['content']}" for chunk in matched_chunks])
 
-        # Exclude fallback strings from conversational memory
         valid_turns = [
             turn for turn in (request.history or [])
             if "I don't find that information" not in turn.content
@@ -256,6 +253,7 @@ Question: {request.question}"""
         )
 
         def token_generator():
+            # Send sources payload immediately so the HTTP stream begins instantly
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"__SOURCES__{sources_payload}__ENDSOURCES__\n"
 
@@ -280,7 +278,7 @@ Question: {request.question}"""
             for model_name in active_models:
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:streamGenerateContent?alt=sse&key={api_key}"
                 try:
-                    with requests.post(url, headers=headers, json=body, stream=True, timeout=(8, 45)) as resp:
+                    with requests.post(url, headers=headers, json=body, stream=True, timeout=(10, 45)) as resp:
                         if resp.status_code == 200:
                             for line in resp.iter_lines():
                                 if line:
