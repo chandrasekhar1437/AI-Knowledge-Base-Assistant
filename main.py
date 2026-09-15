@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from google import genai
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel
 from pypdf import PdfReader
@@ -33,6 +34,9 @@ if not gemini_api_key:
 hf_token = os.getenv("HF_TOKEN")
 if not hf_token:
     raise ValueError("HF_TOKEN is not set in environment variables.")
+
+# Initialize the official Gemini client
+client = genai.Client(api_key=gemini_api_key)
 
 HF_EMBED_URL = "https://router.huggingface.co/hf-inference/models/BAAI/bge-small-en-v1.5"
 
@@ -69,7 +73,6 @@ def get_embedding(text: str) -> List[float]:
 
     raise HTTPException(status_code=500, detail=f"HF Embedding error: {last_err}")
 
-# Preserves complete rubric tables and phase sections together
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=2000,
     chunk_overlap=400,
@@ -129,7 +132,6 @@ async def upload_document(file: UploadFile = File(...)):
             docx_bytes = await file.read()
             doc = docx.Document(io.BytesIO(docx_bytes))
 
-            # Preserve sequential document order for paragraphs and tables
             for element in doc.element.body:
                 if element.tag.endswith("p"):
                     p_text = "".join(node.text for node in element.iter() if node.text and node.tag.endswith("t")).strip()
@@ -201,7 +203,6 @@ def ask_ai_stream(request: AskQuery):
     try:
         query_vector = get_embedding(request.question)
 
-        # Retrieve up to 20 chunks to ensure the entire ingested document is included
         matched_chunks = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
             "match_threshold": 0.0,
@@ -213,7 +214,6 @@ def ask_ai_stream(request: AskQuery):
         else:
             context = "\n\n".join([f"Source: {chunk['title']}\n{chunk['content']}" for chunk in matched_chunks])
 
-        # Filter out prior fallback loops so they do not bias LLM generation
         valid_turns = [
             turn for turn in (request.history or [])
             if "I don't find that information" not in turn.content
@@ -224,12 +224,8 @@ def ask_ai_stream(request: AskQuery):
         prompt = f"""You are a professional documentation assistant. Answer the user's question clearly, thoroughly, and accurately using ONLY the provided Document Context.
 
 STRICT FORMATTING REQUIREMENTS:
-- Provide ONLY the direct answer. No intro meta-talk or planning.
-- Use clean Markdown with double blank lines between paragraphs, headers, and bullet points.
-- Structure lists with each item on its own separate line using bullet syntax:
-  * **Title**: Description here.
-  * **Next Title**: Description here.
-- Never write continuous inline lists or glue headers into bullet text.
+- Provide ONLY the direct answer.
+- Use clean Markdown with clear spacing between points.
 - If the answer is not present in the Document Context, reply exactly: "I don't find that information in the uploaded documents."
 
 Document Context:
@@ -245,34 +241,29 @@ Answer:"""
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"__SOURCES__{sources_payload}__ENDSOURCES__\n"
 
-            # Uses active endpoints with 1.5-flash leading
-            candidate_models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
-            body = {"contents": [{"parts": [{"text": prompt}]}]}
+            try:
+                response = client.models.generate_content_stream(
+                    model="gemini-2.5-flash",
+                    contents=prompt
+                )
+                for chunk in response:
+                    if chunk.text:
+                        yield chunk.text
+                return
+            except Exception as exc:
+                print(f"Primary model generation error: {exc}")
 
-            for model_name in candidate_models:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:streamGenerateContent?alt=sse&key={gemini_api_key}"
-                try:
-                    with requests.post(url, json=body, stream=True, timeout=(10, 60)) as resp:
-                        if resp.status_code == 200:
-                            for line in resp.iter_lines():
-                                if line:
-                                    decoded = line.decode("utf-8")
-                                    if decoded.startswith("data: "):
-                                        try:
-                                            chunk_data = json.loads(decoded[6:])
-                                            parts = chunk_data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-                                            for p in parts:
-                                                txt = p.get("text", "")
-                                                if txt:
-                                                    yield txt
-                                        except Exception:
-                                            continue
-                            return
-                        else:
-                            print(f"Gemini API returned status {resp.status_code} for {model_name}: {resp.text}")
-                except Exception as exc:
-                    print(f"Connection exception with {model_name}: {exc}")
-                    continue
+            try:
+                response = client.models.generate_content_stream(
+                    model="gemini-1.5-flash",
+                    contents=prompt
+                )
+                for chunk in response:
+                    if chunk.text:
+                        yield chunk.text
+                return
+            except Exception as exc:
+                print(f"Fallback model generation error: {exc}")
 
             yield "I don't find that information in the uploaded documents."
 
