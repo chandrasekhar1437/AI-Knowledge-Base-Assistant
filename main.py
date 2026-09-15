@@ -71,7 +71,7 @@ def get_embedding(text: str) -> List[float]:
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1200,
-    chunk_overlap=200,
+    chunk_overlap=250,
     separators=["\n\n", "\n", ". ", " ", ""]
 )
 
@@ -85,7 +85,7 @@ class KnowledgeItem(BaseModel):
 
 class SearchQuery(BaseModel):
     query: str
-    limit: int = 8
+    limit: int = 10
 
 class AskQuery(BaseModel):
     question: str
@@ -128,10 +128,12 @@ async def upload_document(file: UploadFile = File(...)):
             docx_bytes = await file.read()
             doc = docx.Document(io.BytesIO(docx_bytes))
             
+            # Extract standard paragraphs
             for p in doc.paragraphs:
                 if p.text.strip():
                     content_text += p.text.strip() + "\n\n"
             
+            # Extract tables, rubrics, and criteria grids
             for table in doc.tables:
                 for row in table.rows:
                     seen_cells = []
@@ -173,6 +175,21 @@ async def upload_document(file: UploadFile = File(...)):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+@app.post("/search")
+def search_knowledge(search: SearchQuery):
+    try:
+        query_vector = get_embedding(search.query)
+
+        response = supabase.rpc("match_knowledge", {
+            "query_embedding": query_vector,
+            "match_threshold": 0.01,
+            "match_count": search.limit
+        }).execute()
+
+        return {"query": search.query, "results": response.data}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
 @app.post("/ask-stream")
 def ask_ai_stream(request: AskQuery):
     try:
@@ -181,7 +198,7 @@ def ask_ai_stream(request: AskQuery):
         matched_chunks = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
             "match_threshold": 0.01,
-            "match_count": 8
+            "match_count": 10
         }).execute().data
 
         if not matched_chunks:
@@ -194,7 +211,7 @@ def ask_ai_stream(request: AskQuery):
             recent_turns = request.history[-6:]
             formatted_history = "\n".join([f"{turn.role.capitalize()}: {turn.content}" for turn in recent_turns])
 
-        prompt = f"""You are a professional documentation assistant. Answer the user's question clearly and accurately using ONLY the provided Document Context.
+        prompt = f"""You are a professional documentation assistant. Answer the user's question clearly, thoroughly, and accurately using ONLY the provided Document Context.
 
 STRICT FORMATTING REQUIREMENTS:
 - Provide ONLY the direct answer. No intro meta-talk or planning.
@@ -216,7 +233,6 @@ Answer:"""
 
         def token_generator():
             sources_payload = json.dumps({"sources": matched_chunks or []})
-            # Send source metadata prefixed clearly with SSE data convention
             yield f"__SOURCES__{sources_payload}__ENDSOURCES__\n"
 
             candidate_models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-pro"]
@@ -248,5 +264,13 @@ Answer:"""
 
         return StreamingResponse(token_generator(), media_type="text/plain")
 
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+@app.get("/knowledge")
+def get_all_knowledge():
+    try:
+        response = supabase.table("knowledge_base").select("id, title, content, created_at").execute()
+        return {"data": response.data}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
