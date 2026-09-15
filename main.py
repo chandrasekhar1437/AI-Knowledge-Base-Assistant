@@ -85,7 +85,7 @@ class KnowledgeItem(BaseModel):
 
 class SearchQuery(BaseModel):
     query: str
-    limit: int = 10
+    limit: int = 15
 
 class AskQuery(BaseModel):
     question: str
@@ -182,7 +182,7 @@ def search_knowledge(search: SearchQuery):
 
         response = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
-            "match_threshold": 0.01,
+            "match_threshold": 0.0,
             "match_count": search.limit
         }).execute()
 
@@ -195,10 +195,11 @@ def ask_ai_stream(request: AskQuery):
     try:
         query_vector = get_embedding(request.question)
 
+        # Retrieve top 15 chunks with 0.0 threshold to avoid strict cosine drops
         matched_chunks = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
-            "match_threshold": 0.01,
-            "match_count": 10
+            "match_threshold": 0.0,
+            "match_count": 15
         }).execute().data
 
         if not matched_chunks:
@@ -206,10 +207,13 @@ def ask_ai_stream(request: AskQuery):
         else:
             context = "\n\n".join([f"Source: {chunk['title']}\n{chunk['content']}" for chunk in matched_chunks])
 
-        formatted_history = ""
-        if request.history:
-            recent_turns = request.history[-6:]
-            formatted_history = "\n".join([f"{turn.role.capitalize()}: {turn.content}" for turn in recent_turns])
+        # Filter out prior fallback loops so they do not bias LLM generation
+        valid_turns = [
+            turn for turn in (request.history or [])
+            if "I don't find that information" not in turn.content
+        ]
+        recent_turns = valid_turns[-4:]
+        formatted_history = "\n".join([f"{turn.role.capitalize()}: {turn.content}" for turn in recent_turns]) if recent_turns else "None."
 
         prompt = f"""You are a professional documentation assistant. Answer the user's question clearly, thoroughly, and accurately using ONLY the provided Document Context.
 
@@ -226,7 +230,7 @@ Document Context:
 {context}
 
 Prior Conversation:
-{formatted_history if formatted_history else "None."}
+{formatted_history}
 
 Question: {request.question}
 Answer:"""
