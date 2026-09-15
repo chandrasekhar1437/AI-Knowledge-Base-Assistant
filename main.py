@@ -201,7 +201,7 @@ def ask_ai_stream(request: AskQuery):
     try:
         query_vector = get_embedding(request.question)
 
-        # Retrieve up to 20 chunks to guarantee all 14 chunks are passed to Gemini
+        # Retrieve up to 20 chunks to include all 14 chunks of the document
         matched_chunks = supabase.rpc("match_knowledge", {
             "query_embedding": query_vector,
             "match_threshold": 0.0,
@@ -229,7 +229,6 @@ STRICT FORMATTING REQUIREMENTS:
 - Structure lists with each item on its own separate line using bullet syntax:
   * **Title**: Description here.
   * **Next Title**: Description here.
-- Never write continuous inline lists or glue headers into bullet text.
 - If the answer is not present in the Document Context, reply exactly: "I don't find that information in the uploaded documents."
 
 Document Context:
@@ -245,20 +244,23 @@ Answer:"""
             sources_payload = json.dumps({"sources": matched_chunks or []})
             yield f"__SOURCES__{sources_payload}__ENDSOURCES__\n"
 
-            # Tries stable v1 endpoint first, then falls back to v1beta across supported model tags
+            # Validated production endpoints with modern x-goog-api-key authorization
             model_targets = [
-                ("v1", "gemini-1.5-flash"),
                 ("v1beta", "gemini-1.5-flash"),
-                ("v1", "gemini-1.5-flash-latest"),
                 ("v1beta", "gemini-1.5-flash-latest"),
-                ("v1beta", "gemini-1.5-flash-8b")
+                ("v1beta", "gemini-2.5-flash"),
+                ("v1", "gemini-1.5-flash"),
             ]
             body = {"contents": [{"parts": [{"text": prompt}]}]}
+            headers = {
+                "Content-Type": "application/json",
+                "x-goog-api-key": gemini_api_key.strip()
+            }
 
             for api_version, model_name in model_targets:
-                url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model_name}:streamGenerateContent?alt=sse&key={gemini_api_key}"
+                url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model_name}:streamGenerateContent?alt=sse"
                 try:
-                    with requests.post(url, json=body, stream=True, timeout=(10, 60)) as resp:
+                    with requests.post(url, headers=headers, json=body, stream=True, timeout=(10, 60)) as resp:
                         if resp.status_code == 200:
                             for line in resp.iter_lines():
                                 if line:
