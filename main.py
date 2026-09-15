@@ -16,7 +16,7 @@ from database import supabase
 
 load_dotenv()
 
-app = FastAPI(title="AI Knowledge Base API")
+app = FastAPI(title="AI Knowledge Base Assistant API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,46 +28,63 @@ app.add_middleware(
 
 gemini_api_key = os.getenv("GEMINI_API_KEY")
 if not gemini_api_key:
-    raise ValueError("GEMINI_API_KEY is not set in environment variables")
+    raise ValueError("GEMINI_API_KEY is not configured in environment variables.")
 
 hf_token = os.getenv("HF_TOKEN")
 if not hf_token:
-    raise ValueError("HF_TOKEN is not set in environment variables")
+    raise ValueError("HF_TOKEN is not configured in environment variables.")
 
 gemini_client = genai.Client(api_key=gemini_api_key)
 
-# Active Hugging Face Serverless Router Endpoint
-HF_API_URL = "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2"
+HF_FEATURE_EXTRACTION_URL = (
+    "https://router.huggingface.co/hf-inference/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
+)
+HF_FALLBACK_URL = (
+    "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2"
+)
+
 HF_HEADERS = {
     "Authorization": f"Bearer {hf_token}",
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
+    "x-use-cache": "false"
 }
 
 def get_embedding(text: str) -> List[float]:
+    clean_text = text.replace("\r", " ").strip()
     payload = {
-        "inputs": text,
+        "inputs": clean_text,
+        "parameters": {"pooling": "mean", "normalize": True},
         "options": {"wait_for_model": True}
     }
-    
-    for _ in range(3):
-        res = requests.post(HF_API_URL, headers=HF_HEADERS, json=payload, timeout=30)
-        if res.status_code == 200:
-            data = res.json()
-            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
-                return data[0]
-            if isinstance(data, list) and isinstance(data[0], (float, int)):
-                return data
-        elif res.status_code == 503:
-            time.sleep(3)
-            continue
-        else:
-            raise HTTPException(status_code=500, detail=f"HuggingFace embedding error: {res.text}")
-            
-    raise HTTPException(status_code=500, detail="HuggingFace model warmup timed out. Please try again.")
+
+    urls_to_try = [HF_FEATURE_EXTRACTION_URL, HF_FALLBACK_URL]
+
+    for target_url in urls_to_try:
+        for _ in range(3):
+            try:
+                res = requests.post(target_url, headers=HF_HEADERS, json=payload, timeout=40)
+                if res.status_code == 200:
+                    data = res.json()
+                    if isinstance(data, list) and len(data) > 0:
+                        if isinstance(data[0], list):
+                            return data[0]
+                        if isinstance(data[0], (float, int)):
+                            return data
+                elif res.status_code == 503:
+                    time.sleep(3)
+                    continue
+            except requests.RequestException:
+                time.sleep(2)
+                continue
+
+    raise HTTPException(
+        status_code=500,
+        detail="HuggingFace serverless feature extraction failed across endpoints."
+    )
 
 text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1800,
-    chunk_overlap=300,
+    chunk_size=1500,
+    chunk_overlap=250,
     separators=["\n\n", "\n", ". ", " ", ""]
 )
 
@@ -89,7 +106,7 @@ class AskQuery(BaseModel):
 
 @app.get("/")
 def home():
-    return {"message": "AI Knowledge Base API is operational"}
+    return {"message": "AI Knowledge Base Assistant API is active."}
 
 @app.post("/add-knowledge")
 def add_knowledge(item: KnowledgeItem):
@@ -104,8 +121,8 @@ def add_knowledge(item: KnowledgeItem):
         }).execute()
 
         return {"status": "success", "data": response.data}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 @app.post("/upload-document")
 async def upload_document(file: UploadFile = File(...)):
@@ -124,20 +141,20 @@ async def upload_document(file: UploadFile = File(...)):
             content_bytes = await file.read()
             content_text = content_bytes.decode("utf-8")
         else:
-            raise HTTPException(status_code=400, detail="Unsupported file format.")
+            raise HTTPException(status_code=400, detail="Unsupported file format. Provide a PDF or TXT file.")
 
         if not content_text.strip():
-            raise HTTPException(status_code=400, detail="The file contains no readable text.")
+            raise HTTPException(status_code=400, detail="The provided document contains no parseable text.")
 
         chunks = text_splitter.split_text(content_text)
-        clean_doc_name = filename.replace(".pdf", "").replace(".txt", "").replace("_", " ")
+        clean_name = filename.replace(".pdf", "").replace(".txt", "").replace("_", " ")
 
         rows_to_insert = []
-        for index, chunk in enumerate(chunks):
-            enriched_content = f"Document: {clean_doc_name}\nSection {index + 1}:\n{chunk}"
+        for idx, chunk in enumerate(chunks):
+            enriched_content = f"Document: {clean_name}\nSection {idx + 1}:\n{chunk}"
             vector = get_embedding(enriched_content)
             rows_to_insert.append({
-                "title": f"{filename} (part {index + 1})",
+                "title": f"{filename} (part {idx + 1})",
                 "content": enriched_content,
                 "embedding": vector
             })
@@ -149,8 +166,8 @@ async def upload_document(file: UploadFile = File(...)):
             "filename": filename,
             "chunks_created": len(chunks)
         }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 @app.post("/search")
 def search_knowledge(search: SearchQuery):
@@ -164,8 +181,8 @@ def search_knowledge(search: SearchQuery):
         }).execute()
 
         return {"query": search.query, "results": response.data}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 @app.post("/ask-stream")
 def ask_ai_stream(request: AskQuery):
@@ -181,48 +198,48 @@ def ask_ai_stream(request: AskQuery):
         if not matched_chunks:
             context = "No relevant context found in the knowledge base."
         else:
-            context = "\n\n".join([f"Source: {c['title']}\n{c['content']}" for c in matched_chunks])
+            context = "\n\n".join([f"Source: {chunk['title']}\n{chunk['content']}" for chunk in matched_chunks])
 
         formatted_history = ""
         if request.history:
             recent_turns = request.history[-6:]
             formatted_history = "\n".join([f"{turn.role.capitalize()}: {turn.content}" for turn in recent_turns])
 
-        prompt = f"""You are an intelligent portfolio and document assistant.
-Answer the user's question accurately and thoroughly using the provided context and past conversation history.
-Keep links, technology stacks, roles, and details exact.
-If the information is not in the context or chat history, reply: "The knowledge base doesn't contain this information."
+        prompt = f"""You are an intelligent document and knowledge base assistant.
+Answer the user's question clearly, thoroughly, and factually using the relevant document context and chat history below.
+Preserve exact dates, skills, links, tools, and technical specifications.
+If the answer is completely absent from the context and chat history, say: "The knowledge base doesn't contain this information."
 
 Relevant Document Context:
 {context}
 
-Previous Conversation:
-{formatted_history if formatted_history else "No previous conversation."}
+Chat History:
+{formatted_history if formatted_history else "No prior conversation."}
 
-User Question: {request.question}
+Question: {request.question}
 Answer:"""
 
         def token_generator():
             sources_payload = json.dumps({"sources": matched_chunks})
             yield f"{sources_payload}\n"
 
-            response_stream = gemini_client.models.generate_content_stream(
+            stream = gemini_client.models.generate_content_stream(
                 model="gemini-2.5-flash",
                 contents=prompt,
             )
-            for chunk in response_stream:
+            for chunk in stream:
                 if chunk.text:
                     yield chunk.text
 
         return StreamingResponse(token_generator(), media_type="text/plain")
 
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 @app.get("/knowledge")
 def get_all_knowledge():
     try:
         response = supabase.table("knowledge_base").select("id, title, content, created_at").execute()
         return {"data": response.data}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
